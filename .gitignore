@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Base de datos local (datos del negocio: NO subir)
+*.db
+*.sqlite3
+*.sqlite
+
+# Clave de firma JWT generada localmente (NUNCA subir)
+secret_key.txt
+
+# Tests / cachés
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/vite_error.txt
+frontend/vite_output.txt
+npm-debug.log*
+
+# PyInstaller (ejecutables generados en build)
+build/
+dist/
+*.spec
+*.exe
+
+# IDE / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
