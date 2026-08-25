@@ -117,6 +117,23 @@ class SaleCreate(BaseModel):
     days_term: int = Field(15, ge=7, le=15)
     items: List[SaleDetailCreate] = Field(..., min_length=1)
 
+class SaleUpdate(BaseModel):
+    """Actualización de venta (solo administrador): todos los campos opcionales.
+
+    Si se envían items, se reemplaza el detalle completo: el stock de los
+    productos originales se devuelve al inventario y se valida/descuenta el
+    nuevo detalle. El total y los impuestos se recalculan.
+    Si se envían montos recibidos (venta normal, no crédito), se valida el
+    cobro contra el total y el cambio se recalcula automáticamente.
+    """
+    payment_method: Optional[str] = None
+    client_name: Optional[str] = None
+    reference: Optional[str] = None
+    received_bs: Optional[float] = Field(None, ge=0)
+    received_usd: Optional[float] = Field(None, ge=0)
+    items: Optional[List[SaleDetailCreate]] = None
+
+
 class SaleResponse(SaleBase):
     id: int
     created_at: datetime
@@ -149,14 +166,61 @@ class CuentaCreditoResponse(BaseModel):
     rate_usd: Optional[float] = None
     status: str
     notes: Optional[str] = None
+    payment_method: Optional[str] = None
+    reference: Optional[str] = None
+    saldo_usd: float = 0.0
     created_at: datetime
     paid_at: Optional[datetime] = None
     days_term: int = 15
     due_date: Optional[datetime] = None
     notified: bool = False
+    pagos: list["PagoCreditoResponse"] = []
     sale: Optional[SaleResponse] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class PagoCreditoResponse(BaseModel):
+    """Cobro (total o abono) registrado sobre una cuenta por cobrar."""
+    id: int
+    cuenta_id: int
+    monto_usd: float
+    monto_bs: float
+    rate_usd: float
+    payment_method: str
+    reference: Optional[str] = None
+    received_bs: Optional[float] = None
+    received_usd: Optional[float] = None
+    registrado_por: Optional[str] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PagarCuentaRequest(BaseModel):
+    """Registrar un cobro sobre una cuenta por cobrar (solo administrador).
+
+    - monto_usd vacío/omitido → cobra el saldo completo.
+    - monto_usd parcial → abono; la cuenta sigue pendiente hasta cubrir el total.
+    - La tasa aplicada es la vigente el día del pago (la calcula el backend).
+    - En mixto ($ + Bs), received_usd/received_bs son los montos entregados.
+    """
+    payment_method: str
+    reference: Optional[str] = None
+    monto_usd: Optional[float] = Field(None, gt=0)
+    received_bs: Optional[float] = Field(None, ge=0)
+    received_usd: Optional[float] = Field(None, ge=0)
+
+
+class CuentaCreditoUpdate(BaseModel):
+    """Actualización de cuenta por cobrar (solo administrador).
+
+    Si se envía days_term, la fecha de vencimiento se recalcula conservando
+    el ancla actual (due_date o fecha de creación).
+    """
+    client_name: Optional[str] = None
+    days_term: Optional[int] = Field(None, ge=7, le=15)
+    notes: Optional[str] = None
 
 
 class CreditoResumen(BaseModel):

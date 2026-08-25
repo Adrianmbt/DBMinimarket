@@ -5,7 +5,7 @@ from sqlalchemy import func
 from database import get_db
 from models import Category, Product, Purchase, PurchaseDetail, User
 from schemas import PurchaseCreate, PurchaseDetailCreate, PurchaseResponse
-from security import get_current_user, requiere_admin
+from security import get_current_user
 from services.pdf import generar_pdf_compra
 
 router = APIRouter(prefix="/api/compras", tags=["Compras"])
@@ -86,7 +86,6 @@ def crear_compra(
     db: Session = Depends(get_db),
     usuario: User = Depends(get_current_user),
 ):
-    requiere_admin(usuario)
     detalles = []
     total = 0.0
 

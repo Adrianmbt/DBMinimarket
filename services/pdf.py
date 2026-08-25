@@ -17,7 +17,7 @@ FONDO_ALTERNO = colors.HexColor("#F4EFE8")
 AMBER = colors.HexColor("#C9952A")
 CREMA = colors.HexColor("#FFF8F0")
 
-BS_METHODS = {"Bolívares Efectivo", "Bolívares", "Efectivo", "Pago Móvil", "Transferencia", "Biopago"}
+BS_METHODS = {"Bolívares Efectivo", "Bolívares", "Efectivo", "Pago Móvil", "Transferencia", "Biopago", "Punto"}
 
 
 def _fmt(n: float) -> str:
@@ -179,20 +179,22 @@ def generar_pdf_factura(venta, taux=None) -> BytesIO:
     sym = "Bs." if emite_bs else "$"
     conv = (lambda n: round(n * rate, 2)) if emite_bs else (lambda n: round(n, 2))
 
-    igtf_rate = 0.03 if metodo in {"Dólares Efectivo"} else 0.0
+    base_raw = venta.base_amount or 0.0
+    igtf_raw = venta.igtf_amount or 0.0
+    if metodo in {"Dólares Efectivo"}:
+        igtf_rate = 0.03
+    elif igtf_raw > 0 and base_raw > 0:
+        # IGTF parcial (pago mixto): porcentaje efectivo según los montos guardados.
+        igtf_rate = min(round(igtf_raw / base_raw, 4), 0.03)
+    else:
+        igtf_rate = 0.0
     iva_rate = 0.16
     total = conv(venta.total or 0.0)
-    base = conv(venta.base_amount or 0.0)
+    base = conv(base_raw)
     iva = conv(venta.iva_amount or 0.0)
-    igtf = conv(venta.igtf_amount or 0.0)
+    igtf = conv(igtf_raw)
 
     moneda = "BOLÍVARES (VES)" if emite_bs else "DÓLARES (USD)"
-    datos = [
-        Paragraph("<b>Fecha:</b> " + _fecha(venta.created_at), s.td),
-        Paragraph("<b>Moneda:</b> " + moneda, s.td),
-        Paragraph("<b>Cliente:</b> " + (venta.client_name or "Consumidor final"), s.td),
-        Paragraph("<b>Referencia:</b> " + (venta.reference or "—"), s.td),
-    ]
     if emite_bs:
         datos = [
             Paragraph("<b>Fecha:</b> " + _fecha(venta.created_at), s.td),
@@ -204,7 +206,14 @@ def generar_pdf_factura(venta, taux=None) -> BytesIO:
         ]
         story.append(Table([datos[0:3], datos[3:6]], colWidths=[100 * mm, 100 * mm]))
     else:
-        story.append(Table([datos[:2], datos[2:]], colWidths=[100 * mm, 100 * mm]))
+        datos = [
+            Paragraph("<b>Fecha:</b> " + _fecha(venta.created_at), s.td),
+            Paragraph("<b>Moneda:</b> " + moneda, s.td),
+            Paragraph("<b>Método:</b> " + metodo, s.td),
+            Paragraph("<b>Cliente:</b> " + (venta.client_name or "Consumidor final"), s.td),
+            Paragraph("<b>Referencia:</b> " + (venta.reference or "—"), s.td),
+        ]
+        story.append(Table([datos[0:3], datos[3:5]], colWidths=[100 * mm, 100 * mm]))
     story.append(Spacer(1, 3 * mm))
 
     header = ["Producto", "Cantidad", "Precio U.", "Subtotal"]
@@ -352,7 +361,14 @@ def generar_pdf_cierre(ventas, fecha, taux=None) -> BytesIO:
     filas2 = [hdr2]
     for v in ventas:
         hora = v.created_at.strftime("%H:%M") if v.created_at else "—"
-        bs = (v.total or 0.0) * (v.rate_usd or taux or 1.0) if (v.payment_method or "") in BS_METHODS else 0.0
+        metodo_v = v.payment_method or ""
+        if metodo_v.startswith("Mixto"):
+            # Mixto ($ + Bs): a bolívares entró exactamente lo recibido en Bs.
+            bs = v.received_bs or 0.0
+        elif metodo_v in BS_METHODS:
+            bs = (v.total or 0.0) * (v.rate_usd or taux or 1.0)
+        else:
+            bs = 0.0
         filas2.append([
             Paragraph(str(v.id), s.td), Paragraph(hora, s.td),
             Paragraph(v.payment_method or "—", s.td),

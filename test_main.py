@@ -1,4 +1,5 @@
 import pytest
+from datetime import datetime, timezone
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -493,7 +494,9 @@ def test_consultar_ventas_y_resumen_por_fecha():
     h = _auth(token)
     prod, venta = _crear_venta(h, barcode="C2", name="Harina", precio=1.50, cantidad=3)  # total 4.50
 
-    hoy = venta["created_at"][:10]
+    # created_at viene en UTC; el día de negocio es el local (Venezuela, UTC-4)
+    hoy = (datetime.fromisoformat(venta["created_at"])
+           .replace(tzinfo=timezone.utc).astimezone().date().isoformat())
 
     # Listado filtrado por fecha
     lista = client.get(f"/api/ventas?fecha={hoy}", headers=h).json()
@@ -520,6 +523,48 @@ def test_consultar_ventas_y_resumen_por_fecha():
 
     # Fecha inválida da 422
     assert client.get("/api/ventas?fecha=no-es-fecha", headers=h).status_code == 422
+
+
+def test_pago_mixto_metodo_bs_referencia_igtf_parcial():
+    """Pago mixto ($ efectivo + Pago Móvil en Bs): guarda método compuesto y
+    referencia; el IGTF aplica proporcional a la porción en dólares."""
+    h = _auth(_login())
+    cat = client.post("/api/categorias", json={"name": "Mixtos", "sale_unit": "unidad"}, headers=h).json()
+    prod = client.post("/api/productos", json={
+        "barcode": "MIXT1", "name": "Refresco 2L", "cost_price": 0.5, "sale_price": 2.00,
+        "stock": 50, "min_stock": 5, "category_id": cat["id"],
+    }, headers=h).json()
+
+    tasa = client.get("/api/tasa", headers=h).json()["rate"]
+    # Total: 4 und x $2.00 = $8. La mitad ($4) en efectivo y la mitad en Bs por Pago Móvil.
+    rec_usd = 4.0
+    rec_bs = round(4.0 * tasa, 2)
+    r = client.post("/api/ventas", json={
+        "items": [{"product_id": prod["id"], "quantity": 4}],
+        "payment_method": "Mixto ($ + Pago Móvil)",
+        "reference": "00845123",
+        "currency": "USD",
+        "received_usd": rec_usd,
+        "received_bs": rec_bs,
+    }, headers=h)
+    assert r.status_code == 200
+    venta = r.json()
+    assert venta["payment_method"] == "Mixto ($ + Pago Móvil)"
+    assert venta["reference"] == "00845123"
+
+    # IGTF parcial (fracción 50% en $): ~0.10 USD, menos que el 3% completo (~0.20)
+    assert venta["igtf_amount"] is not None
+    assert 0 < venta["igtf_amount"] < 0.15
+
+    # El resumen agrupa el método mixto y contabiliza los Bs recibidos
+    res = client.get("/api/ventas/resumen", headers=h).json()
+    met = {m["metodo"]: m for m in res["metodos"]}
+    assert "Mixto ($ + Pago Móvil)" in met
+    assert abs(met["Mixto ($ + Pago Móvil)"]["bs"] - rec_bs) < 0.05
+
+    # Factura y reporte Z se generan sin errores con método mixto
+    assert client.get(f"/api/ventas/{venta['id']}/factura", headers=h).status_code == 200
+    assert client.get("/api/ventas/cierre/pdf", headers=h).status_code == 200
 
 
 # ==========================================
@@ -603,15 +648,18 @@ def test_barcode_duplicado_400():
     assert client.post("/api/productos", json=dup, headers=h).status_code == 400
 
 
-def test_compras_solo_admin():
-    """Registrar compras (entrada de stock e información de costos) exige admin."""
+def test_compras_crear_cualquier_rol():
+    """Cualquier usuario autenticado (admin o vendedor) puede registrar compras nuevas."""
     h = _auth(_login())
     vh = _login_vendedor("cajero_compras")
     compra = {"supplier": "Distribuidora X", "items": [
         {"name": "Pasta 500g", "cost_price": 0.5, "min_stock": 5, "boxes": 1, "units_per_box": 10},
     ]}
-    assert client.post("/api/compras", json=compra, headers=vh).status_code == 403
-    assert client.post("/api/compras", json=compra, headers=h).status_code == 200
+    assert client.post("/api/compras", json=compra, headers=vh).status_code == 200
+    compra2 = {"supplier": "Distribuidora Y", "items": [
+        {"name": "Fideo 500g", "cost_price": 0.6, "min_stock": 5, "boxes": 1, "units_per_box": 10},
+    ]}
+    assert client.post("/api/compras", json=compra2, headers=h).status_code == 200
 
 
 def test_baja_stock_solo_admin():
@@ -620,3 +668,356 @@ def test_baja_stock_solo_admin():
     p = client.post("/api/productos", json={"name": "Jabón", "cost_price": 0.5, "sale_price": 1.0, "stock": 10}, headers=h).json()
     vh = _login_vendedor("cajero_baja")
     assert client.post(f"/api/productos/{p['id']}/baja", json={"cantidad": 2, "motivo": "Dañado"}, headers=vh).status_code == 403
+
+def _venta_base(h, barcode="QA1", stock=10, precio=2.00):
+    """Helper: crea un producto y una venta simple. Devuelve (producto, venta)."""
+    prod = client.post("/api/productos", json={
+        "barcode": barcode, "name": f"Prod {barcode}", "cost_price": 1.0,
+        "sale_price": precio, "stock": stock,
+    }, headers=h).json()
+    venta = client.post("/api/ventas", json={
+        "items": [{"product_id": prod["id"], "quantity": 4}],
+        "client_name": "Cliente Original",
+    }, headers=h).json()
+    return prod, venta
+
+
+def test_crud_ventas_actualizar_solo_admin():
+    """PUT /api/ventas/{id}: solo admin; recalcula total y ajusta stock."""
+    h = _auth(_login())
+    vh = _login_vendedor("cajero_ventau")
+    prod, venta = _venta_base(h)
+    pid = prod["id"]
+
+    # El vendedor no puede actualizar
+    assert client.put(f"/api/ventas/{venta['id']}", json={"client_name": "X"}, headers=vh).status_code == 403
+
+    # Admin reduce la cantidad de 4 a 1: total 8.00 -> 2.00, stock 6 -> 9
+    r = client.put(f"/api/ventas/{venta['id']}", json={
+        "items": [{"product_id": pid, "quantity": 1}],
+    }, headers=h)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total"] == 2.00
+    assert len(data["details"]) == 1 and data["details"][0]["quantity"] == 1
+    assert client.get(f"/api/productos/{pid}", headers=h).json()["stock"] == 9
+
+    # Cambia cliente, método de pago y referencia
+    r = client.put(f"/api/ventas/{venta['id']}", json={
+        "client_name": "Cliente Editado",
+        "payment_method": "Pago Móvil",
+        "reference": "123456",
+    }, headers=h)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["client_name"] == "Cliente Editado"
+    assert data["payment_method"] == "Pago Móvil"
+    assert data["reference"] == "123456"
+
+    # Stock insuficiente al ampliar (solo hay 9 disponibles)
+    r = client.put(f"/api/ventas/{venta['id']}", json={
+        "items": [{"product_id": pid, "quantity": 20}],
+    }, headers=h)
+    assert r.status_code == 400
+
+    # Venta inexistente -> 404
+    assert client.put("/api/ventas/99999", json={"client_name": "Y"}, headers=h).status_code == 404
+
+
+def test_crud_ventas_eliminar_solo_admin():
+    """DELETE /api/ventas/{id}: solo admin; devuelve el stock al inventario."""
+    h = _auth(_login())
+    vh = _login_vendedor("cajero_ventad")
+    prod, venta = _venta_base(h, barcode="QA2")
+    pid = prod["id"]
+    vid = venta["id"]
+
+    # El vendedor no puede eliminar
+    assert client.delete(f"/api/ventas/{vid}", headers=vh).status_code == 403
+
+    # Admin elimina: el stock vuelve de 6 a 10
+    r = client.delete(f"/api/ventas/{vid}", headers=h)
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    assert client.get(f"/api/ventas/{vid}", headers=h).status_code == 404
+    assert client.get(f"/api/productos/{pid}", headers=h).json()["stock"] == 10
+
+    # Eliminar de nuevo -> 404
+    assert client.delete(f"/api/ventas/{vid}", headers=h).status_code == 404
+
+
+def test_crud_ventas_bloqueo_cierre_z():
+    """No se puede editar ni eliminar ventas de días con caja cerrada."""
+    h = _auth(_login())
+    _, venta = _venta_base(h, barcode="QA3")
+
+    # Cerrar la caja de hoy bloquea la edición y eliminación de la venta de hoy
+    assert client.post("/api/ventas/cierre", headers=h).status_code == 200
+    r_put = client.put(f"/api/ventas/{venta['id']}", json={"client_name": "Tarde"}, headers=h)
+    assert r_put.status_code == 409
+    r_del = client.delete(f"/api/ventas/{venta['id']}", headers=h)
+    assert r_del.status_code == 409
+
+
+def test_crud_creditos_actualizar_eliminar():
+    """CRUD completo en cuentas por cobrar (todo el módulo es solo admin).
+
+    PUT actualiza cliente/plazo/notas sincronizando la venta; DELETE elimina
+    la cuenta junto con su venta a crédito y devuelve el stock.
+    """
+    h = _auth(_login())
+    vh = _login_vendedor("cajero_cred")
+    prod = client.post("/api/productos", json={
+        "barcode": "QA4", "name": "Aceite", "cost_price": 2.0,
+        "sale_price": 3.0, "stock": 10,
+    }, headers=h).json()
+
+    # Crear venta a crédito (Create del módulo Créditos)
+    venta = client.post("/api/ventas", json={
+        "items": [{"product_id": prod["id"], "quantity": 2}],
+        "is_credit": True, "client_name": "Doña Rosa", "days_term": 15,
+    }, headers=h).json()
+    assert venta["is_credit"] is True
+
+    cuentas = client.get("/api/creditos", headers=vh)
+    assert cuentas.status_code == 403  # listar créditos ya exige admin
+    cuentas = client.get("/api/creditos", headers=h).json()
+    cuenta = next(c for c in cuentas if c["sale_id"] == venta["id"])
+    cid = cuenta["id"]
+    assert cuenta["status"] == "pendiente"
+    assert cuenta["days_term"] == 15
+
+    # Actualizar cliente y plazo: vencimiento se recalcula (-8 días desde el ancla)
+    r = client.put(f"/api/creditos/{cid}", json={
+        "client_name": "Doña Rosa Pérez", "days_term": 7, "notes": "Paga los viernes",
+    }, headers=h)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["client_name"] == "Doña Rosa Pérez"
+    assert data["days_term"] == 7
+    assert data["notes"] == "Paga los viernes"
+
+    # La venta asociada quedó sincronizada
+    venta_sync = client.get(f"/api/ventas/{venta['id']}", headers=h).json()
+    assert venta_sync["client_name"] == "Doña Rosa Pérez"
+    assert venta_sync["reference"] == "Paga los viernes"
+
+    # Vendedor no puede actualizar ni eliminar
+    assert client.put(f"/api/creditos/{cid}", json={"notes": "x"}, headers=vh).status_code == 403
+    assert client.delete(f"/api/creditos/{cid}", headers=vh).status_code == 403
+
+    # Admin elimina la cuenta: desaparece la cuenta Y la venta; stock vuelve a 10
+    r = client.delete(f"/api/creditos/{cid}", headers=h)
+    assert r.status_code == 200
+    assert client.get(f"/api/creditos/{cid}", headers=h).status_code == 404
+    assert client.get(f"/api/ventas/{venta['id']}", headers=h).status_code == 404
+    assert client.get(f"/api/productos/{prod['id']}", headers=h).json()["stock"] == 10
+
+
+def test_crud_ventas_actualizar_venta_credito_sincroniza_cuenta():
+    """Editar los items de una venta a crédito actualiza su cuenta por cobrar."""
+    h = _auth(_login())
+    prod = client.post("/api/productos", json={
+        "barcode": "QA5", "name": "Azúcar", "cost_price": 0.5,
+        "sale_price": 1.0, "stock": 10,
+    }, headers=h).json()
+    venta = client.post("/api/ventas", json={
+        "items": [{"product_id": prod["id"], "quantity": 5}],
+        "is_credit": True, "client_name": "Bodegón María",
+    }, headers=h).json()
+
+    # Reducir a 2 unidades: total 5.00 -> 2.00
+    r = client.put(f"/api/ventas/{venta['id']}", json={
+        "items": [{"product_id": prod["id"], "quantity": 2}],
+    }, headers=h)
+    assert r.status_code == 200 and r.json()["total"] == 2.00
+
+    cuentas = client.get("/api/creditos", headers=h).json()
+    cuenta = next(c for c in cuentas if c["sale_id"] == venta["id"])
+    assert cuenta["total_usd"] == 2.00
+
+
+def test_crud_ventas_actualizar_cobro_recibido():
+    """PUT actualiza el monto recibido: valida el cobro y recalcula el cambio."""
+    from services.bcv import DEFAULT_RATE
+
+    h = _auth(_login())
+    prod, venta = _venta_base(h, barcode="QA6", stock=10, precio=2.00)  # total 8.00
+    vid = venta["id"]
+    esperado_bs = 8.00 * DEFAULT_RATE
+
+    # Monto recibido insuficiente -> 400 y la venta queda sin cambios
+    r = client.put(f"/api/ventas/{vid}", json={"received_bs": esperado_bs - 50}, headers=h)
+    assert r.status_code == 400
+    assert client.get(f"/api/ventas/{vid}", headers=h).json()["change_bs"] is None
+
+    # Monto suficiente: el backend recalcula el cambio automáticamente
+    r = client.put(f"/api/ventas/{vid}", json={"received_bs": esperado_bs + 10}, headers=h)
+    assert r.status_code == 200
+    data = r.json()
+    assert abs(data["change_bs"] - 10.0) < 0.01
+    assert data["received_bs"] == round(esperado_bs + 10, 2)
+
+    # Enviar 0 limpia el cobro registrado
+    r = client.put(f"/api/ventas/{vid}", json={"received_bs": 0}, headers=h)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["received_bs"] is None and data["change_bs"] is None
+
+
+def test_crud_ventas_actualizar_pago_mixto():
+    """PUT cambia a método mixto ($ + Bs electrónico): guarda referencia y calcula el cambio."""
+    from services.bcv import DEFAULT_RATE
+
+    h = _auth(_login())
+    prod, venta = _venta_base(h, barcode="QA7", stock=10, precio=2.00)  # total 8.00
+    vid = venta["id"]
+    payload_mixto = {
+        "payment_method": "Mixto ($ + Pago Móvil)",
+        "reference": "00998877",
+        "received_usd": 5.0,
+    }
+
+    # El faltante en Bs no cubre el total (150 / 730 << 3 USD) -> 400
+    r = client.put(f"/api/ventas/{vid}", json={**payload_mixto, "received_bs": 150.0}, headers=h)
+    assert r.status_code == 400
+
+    # Exceso en Bs -> el cambio se calcula en USD
+    r = client.put(f"/api/ventas/{vid}", json={**payload_mixto, "received_bs": 2500.0}, headers=h)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["payment_method"] == "Mixto ($ + Pago Móvil)"
+    assert data["reference"] == "00998877"
+    esperado_recibido = 5.0 + 2500.0 / DEFAULT_RATE
+    assert abs(data["change_usd"] - (esperado_recibido - 8.0)) < 0.01
+
+    # Monto exacto -> sin cambio pendiente
+    exacto_bs = round((8.0 - 5.0) * DEFAULT_RATE, 2)
+    r = client.put(f"/api/ventas/{vid}", json={"received_usd": 5.0, "received_bs": exacto_bs}, headers=h)
+    assert r.status_code == 200
+    assert abs((r.json()["change_usd"] or 0.0)) < 0.01
+
+
+def test_creditos_cobro_completo_con_metodo():
+    """Registrar cobro: exige método, guarda referencia si es electrónico,
+    usa la tasa del día del pago y marca la cuenta como pagada."""
+    from services.bcv import DEFAULT_RATE
+
+    h = _auth(_login())
+    prod = client.post("/api/productos", json={
+        "barcode": "QA8", "name": "Harina", "cost_price": 1.0,
+        "sale_price": 2.0, "stock": 10,
+    }, headers=h).json()
+    venta = client.post("/api/ventas", json={
+        "items": [{"product_id": prod["id"], "quantity": 3}],  # total 6.00 USD
+        "is_credit": True, "client_name": "Compadre Juan",
+    }, headers=h).json()
+    cuenta = next(c for c in client.get("/api/creditos", headers=h).json() if c["sale_id"] == venta["id"])
+    cid = cuenta["id"]
+
+    # Sin método -> 400
+    r = client.post(f"/api/creditos/{cid}/pagar", json={}, headers=h)
+    assert r.status_code == 422 or r.status_code == 400
+
+    # Pago Móvil sin referencia -> 400
+    r = client.post(f"/api/creditos/{cid}/pagar", json={"payment_method": "Pago Móvil"}, headers=h)
+    assert r.status_code == 400
+
+    # Cobro completo con referencia: la tasa aplicada es la vigente (día del pago)
+    r = client.post(f"/api/creditos/{cid}/pagar", json={
+        "payment_method": "Pago Móvil", "reference": "00745123",
+    }, headers=h)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["status"] == "pagado"
+    assert data["payment_method"] == "Pago Móvil"
+    assert data["reference"] == "00745123"
+    assert data["saldo_usd"] == 0.0
+    assert len(data["pagos"]) == 1
+    pago = data["pagos"][0]
+    assert abs(pago["monto_usd"] - 6.0) < 0.01
+    assert abs(pago["monto_bs"] - 6.0 * DEFAULT_RATE) < 0.05
+    assert abs(pago["rate_usd"] - DEFAULT_RATE) < 0.01
+
+    # Ya pagada -> 400
+    r = client.post(f"/api/creditos/{cid}/pagar", json={"payment_method": "Punto"}, headers=h)
+    assert r.status_code == 400
+
+
+def test_creditos_abonos_parciales():
+    """Abonos parciales: la cuenta queda pendiente hasta cubrir el saldo total."""
+    h = _auth(_login())
+    prod = client.post("/api/productos", json={
+        "barcode": "QA9", "name": "Arroz", "cost_price": 0.8,
+        "sale_price": 2.0, "stock": 10,
+    }, headers=h).json()
+    venta = client.post("/api/ventas", json={
+        "items": [{"product_id": prod["id"], "quantity": 5}],  # total 10.00 USD
+        "is_credit": True, "client_name": "Bodega El Progreso",
+    }, headers=h).json()
+    cid = next(c for c in client.get("/api/creditos", headers=h).json() if c["sale_id"] == venta["id"])["id"]
+
+    # Abono de 4 USD -> sigue pendiente con saldo 6
+    r = client.post(f"/api/creditos/{cid}/pagar", json={
+        "payment_method": "Bolívares Efectivo", "monto_usd": 4.0,
+    }, headers=h)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "pendiente"
+    assert abs(data["saldo_usd"] - 6.0) < 0.01
+    assert len(data["pagos"]) == 1
+
+    # Abono mayor al saldo -> 400
+    r = client.post(f"/api/creditos/{cid}/pagar", json={
+        "payment_method": "Bolívares Efectivo", "monto_usd": 99.0,
+    }, headers=h)
+    assert r.status_code == 400
+
+    # Segundo abono cubre el resto -> pagado
+    r = client.post(f"/api/creditos/{cid}/pagar", json={
+        "payment_method": "Dólares Efectivo", "monto_usd": 6.0,
+    }, headers=h)
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "pagado" and data["saldo_usd"] == 0.0
+    assert len(data["pagos"]) == 2
+
+
+def test_creditos_cobro_mixto():
+    """Cobro mixto ($ + Bs) sobre una cuenta: valida montos y registra el cobro."""
+    from services.bcv import DEFAULT_RATE
+
+    h = _auth(_login())
+    prod = client.post("/api/productos", json={
+        "barcode": "QA10", "name": "Pasta", "cost_price": 0.5,
+        "sale_price": 1.0, "stock": 10,
+    }, headers=h).json()
+    venta = client.post("/api/ventas", json={
+        "items": [{"product_id": prod["id"], "quantity": 8}],  # total 8.00 USD
+        "is_credit": True, "client_name": "Ferretería La 40",
+    }, headers=h).json()
+    cid = next(c for c in client.get("/api/creditos", headers=h).json() if c["sale_id"] == venta["id"])["id"]
+    metodo_mixto = {"payment_method": "Mixto ($ + Pago Móvil)", "reference": "00991122"}
+
+    # Mixto electrónico sin referencia -> 400
+    r = client.post(f"/api/creditos/{cid}/pagar", json={**metodo_mixto, "reference": None}, headers=h)
+    assert r.status_code == 400
+
+    # Montos entregados insuficientes -> 400 (5 + 100/730 << 8)
+    r = client.post(f"/api/creditos/{cid}/pagar", json={
+        **metodo_mixto, "received_usd": 5.0, "received_bs": 100.0,
+    }, headers=h)
+    assert r.status_code == 400
+
+    # Montos suficientes ($4 + Bs exacto para los $4 restantes) -> pagado
+    exacto_bs = round(4.0 * DEFAULT_RATE, 2)
+    r = client.post(f"/api/creditos/{cid}/pagar", json={
+        **metodo_mixto, "received_usd": 4.0, "received_bs": exacto_bs,
+    }, headers=h)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["status"] == "pagado" and data["saldo_usd"] == 0.0
+    pago = data["pagos"][0]
+    assert pago["payment_method"] == "Mixto ($ + Pago Móvil)"
+    assert abs(pago["monto_usd"] - 8.0) < 0.01
+    assert pago["received_usd"] == 4.0 and pago["received_bs"] == exacto_bs

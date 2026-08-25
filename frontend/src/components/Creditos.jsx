@@ -4,16 +4,17 @@ import {
   Paper, Button, Typography, Chip, Box, Avatar, Alert, Snackbar,
   Dialog, DialogTitle, DialogContent, DialogActions, IconButton,
   TextField, MenuItem, Select, FormControl, InputLabel, Divider,
-  Slide, CircularProgress,
+  Slide, CircularProgress, Switch,
 } from '@mui/material'
 import {
   AccountBalanceWallet, Search, CheckCircle, Pending, Visibility,
   Close, Warning, Schedule, CreditCard, AddCircle, RemoveCircle,
-  Delete, ShoppingCart, Receipt, QrCodeScanner, CalendarMonth,
+  Delete, ShoppingCart, Receipt, QrCodeScanner, CalendarMonth, Edit,
 } from '@mui/icons-material'
 import {
-  getCuentasCredito, marcarPagada, getResumenCredito,
+  getCuentasCredito, registrarCobro, getResumenCredito,
   getProximasVencer, marcarNotificadas,
+  actualizarCuenta, eliminarCuenta,
 } from '../api/creditos'
 import { getProductos } from '../api/productos'
 import { getTasa } from '../api/tasa'
@@ -77,6 +78,17 @@ const TERM_OPTIONS = [
   { value: 15, label: '15 días' },
 ]
 
+/* Métodos de pago para el cobro (igual que ventas) */
+const COBRO_PAYMENT_OPTIONS = [
+  { value: 'Bolívares Efectivo', label: 'Bolívares en Efectivo', icon: '💵', currency: 'BS' },
+  { value: 'Pago Móvil', label: 'Pago Móvil', icon: '📱', currency: 'BS' },
+  { value: 'Transferencia', label: 'Transferencia', icon: '🏦', currency: 'BS' },
+  { value: 'Biopago', label: 'Biopago', icon: '🔵', currency: 'BS' },
+  { value: 'Dólares Efectivo', label: 'Dólares en Efectivo', icon: '💲', currency: 'USD' },
+  { value: 'Punto', label: 'Punto de Venta', icon: '💳', currency: 'BS' },
+]
+const COBRO_METHODS_WITH_REFERENCE = ['Punto', 'Pago Móvil', 'Transferencia', 'Biopago']
+
 const rowSx = {
   animation: 'fade-in-up 0.3s ease-out both',
   '&:hover': { bgcolor: 'rgba(45, 90, 30, 0.04)' },
@@ -96,10 +108,32 @@ export default function Creditos() {
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [cuentaSeleccionada, setCuentaSeleccionada] = useState(null)
   const [pagando, setPagando] = useState(false)
+  /* ── Estado del diálogo de cobro (método, referencia, mixto y abonos) ── */
+  const [cobroTasa, setCobroTasa] = useState(null)
+  const [cobroMetodo, setCobroMetodo] = useState('Bolívares Efectivo')
+  const [cobroMixtoBs, setCobroMixtoBs] = useState('Bolívares Efectivo')
+  const [cobroRef, setCobroRef] = useState('')
+  const [cobroRecBs, setCobroRecBs] = useState('')
+  const [cobroRecUsd, setCobroRecUsd] = useState('')
+  const [abonoActivo, setAbonoActivo] = useState(false)
+  const [abonoMonto, setAbonoMonto] = useState('')
   const [detailOpen, setDetailOpen] = useState(false)
   const [detailCuenta, setDetailCuenta] = useState(null)
   const [proximasVencer, setProximasVencer] = useState([])
   const [notifOpen, setNotifOpen] = useState(false)
+
+  /* ── Estado de edición/eliminación (solo admin) ── */
+  const rawUser = typeof window !== 'undefined' ? (localStorage.getItem('user') || sessionStorage.getItem('user')) : null
+  const isAdmin = JSON.parse(rawUser || '{}').role === 'admin'
+  const [editOpen, setEditOpen] = useState(false)
+  const [editCuenta, setEditCuenta] = useState(null)
+  const [editCliente, setEditCliente] = useState('')
+  const [editPlazo, setEditPlazo] = useState(15)
+  const [editNotas, setEditNotas] = useState('')
+  const [editSaving, setEditSaving] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState(null)
+  const [deleting, setDeleting] = useState(false)
 
   /* ── Estado del dialogo de nueva venta a crédito ── */
   const [creditDialogOpen, setCreditDialogOpen] = useState(false)
@@ -109,7 +143,6 @@ export default function Creditos() {
   const [cart, setCart] = useState([])
   const [clientName, setClientName] = useState('')
   const [daysTerm, setDaysTerm] = useState(15)
-  const [currency, setCurrency] = useState('BS')
   const [submitting, setSubmitting] = useState(false)
   const [tasa, setTasa] = useState(null)
 
@@ -150,17 +183,87 @@ export default function Creditos() {
   const { page, rowsPerPage, total, actuales, handleChangePage, handleChangeRowsPerPage } = usePaginacion(cuentasFiltradas)
 
   /* ── Acciones de cuentas ── */
-  const handleMarcarPagada = async () => {
+  const openCobroDialog = async (c) => {
+    setCuentaSeleccionada(c)
+    setCobroMetodo('Bolívares Efectivo')
+    setCobroMixtoBs('Bolívares Efectivo')
+    setCobroRef('')
+    setCobroRecBs('')
+    setCobroRecUsd('')
+    setAbonoActivo(false)
+    setAbonoMonto('')
+    setCobroTasa(null)
+    setConfirmOpen(true)
+    try {
+      const tasaRes = await getTasa()
+      setCobroTasa(tasaRes.data?.rate || null)
+    } catch {
+      setCobroTasa(null)
+    }
+  }
+
+  /* ── Derivados del diálogo de cobro ── */
+  const cobroSaldo = cuentaSeleccionada
+    ? (cuentaSeleccionada.saldo_usd ?? cuentaSeleccionada.total_usd ?? 0)
+    : 0
+  const cobroYaAbonado = cuentaSeleccionada
+    ? Math.max((cuentaSeleccionada.total_usd || 0) - cobroSaldo, 0)
+    : 0
+  const cobroEsMixto = cobroMetodo === 'Mixto'
+  const cobroMetodoRef = cobroEsMixto ? cobroMixtoBs : cobroMetodo
+  const cobroNecesitaRef = COBRO_METHODS_WITH_REFERENCE.includes(cobroMetodoRef)
+  const cRecBs = parseFloat(String(cobroRecBs).replace(',', '.')) || 0
+  const cRecUsd = parseFloat(String(cobroRecUsd).replace(',', '.')) || 0
+  const abonoSolicitado = parseFloat(String(abonoMonto).replace(',', '.')) || 0
+  const montoAbonar = abonoActivo && abonoSolicitado > 0 ? Math.min(abonoSolicitado, cobroSaldo) : cobroSaldo
+  const cobroMoneda = cobroEsMixto
+    ? 'USD'
+    : (COBRO_PAYMENT_OPTIONS.find(o => o.value === cobroMetodo) || {}).currency || 'BS'
+  const cobroRecibeTotal = cobroEsMixto && cobroTasa ? cRecUsd + cRecBs / cobroTasa : 0
+  const cobroFaltaUsd = cobroEsMixto && cobroRecibeTotal > 0 ? Math.max(montoAbonar - cobroRecibeTotal, 0) : null
+  const cobroInsuficiente = cobroEsMixto && cobroRecibeTotal > 0 && cobroFaltaUsd > 0.005
+  const abonoExcede = abonoActivo && abonoSolicitado > cobroSaldo + 0.005
+
+  const handleRegistrarCobro = async () => {
     if (!cuentaSeleccionada) return
+    if (!cobroMetodo) {
+      setSnack({ open: true, msg: 'Selecciona el método de pago con el que cancela el cliente', severity: 'error' })
+      return
+    }
+    if (abonoExcede) {
+      setSnack({ open: true, msg: `El abono excede el saldo pendiente (${money(cobroSaldo, 'USD')})`, severity: 'error' })
+      return
+    }
+    if (cobroInsuficiente) {
+      setSnack({ open: true, msg: 'Los montos recibidos no cubren el monto a abonar', severity: 'error' })
+      return
+    }
+    if (cobroNecesitaRef && !cobroRef.trim()) {
+      setSnack({ open: true, msg: `Ingresa la referencia bancaria del pago (${cobroMetodoRef})`, severity: 'error' })
+      return
+    }
     setPagando(true)
     try {
-      await marcarPagada(cuentaSeleccionada.id)
-      setSnack({ open: true, msg: 'Cuenta marcada como pagada exitosamente', severity: 'success' })
+      const payload = {
+        payment_method: cobroEsMixto ? `Mixto ($ + ${cobroMixtoBs})` : cobroMetodo,
+        reference: cobroNecesitaRef ? (cobroRef.trim() || null) : null,
+        ...(abonoActivo && abonoSolicitado > 0 ? { monto_usd: abonoSolicitado } : {}),
+        ...(cobroEsMixto ? { received_usd: cRecUsd, received_bs: cRecBs } : {}),
+      }
+      await registrarCobro(cuentaSeleccionada.id, payload)
+      const completa = !abonoActivo || abonoSolicitado >= cobroSaldo - 0.005
+      setSnack({
+        open: true,
+        msg: completa
+          ? `Cuenta #${cuentaSeleccionada.id} pagada por completo`
+          : `Abono de ${money(montoAbonar, 'USD')} registrado · saldo ${money(Math.max(cobroSaldo - montoAbonar, 0), 'USD')}`,
+        severity: 'success',
+      })
       setConfirmOpen(false)
       setCuentaSeleccionada(null)
       loadData()
     } catch (err) {
-      setSnack({ open: true, msg: err.response?.data?.detail || 'Error al marcar como pagada', severity: 'error' })
+      setSnack({ open: true, msg: err.response?.data?.detail || 'Error al registrar el cobro', severity: 'error' })
     } finally { setPagando(false) }
   }
 
@@ -172,6 +275,74 @@ export default function Creditos() {
       setProximasVencer(prev => prev.map(c => ({ ...c, notified: true })))
       setNotifOpen(false)
     } catch {}
+  }
+
+  /* ── Edición y eliminación de cuentas (solo admin) ── */
+  const openEditDialog = (c) => {
+    if (!isAdmin) return
+    setEditCuenta(c)
+    setEditCliente(c.client_name || '')
+    setEditPlazo(c.days_term || 15)
+    setEditNotas(c.notes || '')
+    setEditOpen(true)
+  }
+
+  const nuevoVencimiento = (() => {
+    if (!editCuenta) return null
+    const ancla = editCuenta.due_date ? new Date(editCuenta.due_date) : new Date(editCuenta.created_at)
+    const delta = editPlazo - (editCuenta.days_term || 0)
+    ancla.setDate(ancla.getDate() + delta)
+    return formatFechaCorta(ancla.toISOString())
+  })()
+
+  const handleEditSave = async () => {
+    if (!editCuenta) return
+    if (!editCliente.trim()) {
+      setSnack({ open: true, msg: 'El nombre del cliente es obligatorio', severity: 'error' })
+      return
+    }
+    setEditSaving(true)
+    try {
+      await actualizarCuenta(editCuenta.id, {
+        client_name: editCliente.trim(),
+        days_term: editPlazo,
+        notes: editNotas.trim() || null,
+      })
+      setSnack({ open: true, msg: `Cuenta #${editCuenta.id} actualizada exitosamente`, severity: 'success' })
+      setEditOpen(false)
+      setEditCuenta(null)
+      loadData()
+    } catch (err) {
+      setSnack({ open: true, msg: err.response?.data?.detail || 'Error al actualizar la cuenta', severity: 'error' })
+    } finally {
+      setEditSaving(false)
+    }
+  }
+
+  const confirmDelete = (c) => {
+    if (!isAdmin) return
+    setDeleteTarget(c)
+    setDeleteOpen(true)
+  }
+
+  const handleDeleteConfirmado = async () => {
+    if (!deleteTarget) return
+    setDeleting(true)
+    try {
+      await eliminarCuenta(deleteTarget.id)
+      setSnack({
+        open: true,
+        msg: `Cuenta #${deleteTarget.id} eliminada junto con su venta. Stock devuelto.`,
+        severity: 'success',
+      })
+      setDeleteOpen(false)
+      setDeleteTarget(null)
+      loadData()
+    } catch (err) {
+      setSnack({ open: true, msg: err.response?.data?.detail || 'Error al eliminar la cuenta', severity: 'error' })
+    } finally {
+      setDeleting(false)
+    }
   }
 
   /* ── Abrir dialogo de nueva venta a crédito ── */
@@ -190,7 +361,6 @@ export default function Creditos() {
     setSearch('')
     setClientName('')
     setDaysTerm(15)
-    setCurrency('BS')
     setShowResults(false)
     setCreditDialogOpen(true)
     setTimeout(() => searchRef.current?.focus(), 200)
@@ -256,7 +426,8 @@ export default function Creditos() {
 
   const totalUSD = cart.reduce((sum, c) => sum + subtotalDe(c), 0)
   const tasaActual = tasa || 0
-  const totalCobrar = currency === 'BS' ? totalUSD * tasaActual : totalUSD
+  // La deuda queda denominada en dólares: el método de pago se elige al cobrar
+  const totalCobrar = totalUSD
   const itemsCount = cart.reduce((sum, c) => sum + (c.sale_unit === 'peso' ? 1 : c.unitQty), 0)
 
   const handleSearchKeyDown = (e) => {
@@ -295,7 +466,7 @@ export default function Creditos() {
     try {
       await createVenta({
         payment_method: 'Crédito', client_name: clientName.trim(), reference: null,
-        currency, rate: tasaActual, received_bs: null, received_usd: null,
+        currency: 'USD', rate: tasaActual, received_bs: null, received_usd: null,
         change_bs: null, change_usd: null, is_credit: true, days_term: daysTerm,
         items: cart.map(c => c.sale_unit === 'peso'
           ? { product_id: c.product_id, quantity: Math.round(c.weightG || 0) }
@@ -513,23 +684,47 @@ export default function Creditos() {
                   <TableCell>
                     <Chip
                       icon={c.status === 'pagado' ? <CheckCircle sx={{ fontSize: 14 }} /> : <Pending sx={{ fontSize: 14 }} />}
-                      label={c.status === 'pagado' ? 'Pagado' : 'Pendiente'}
+                      label={c.status === 'pagado'
+                        ? 'Pagado'
+                        : (c.pagos?.length > 0
+                          ? `Parcial · falta ${money(c.saldo_usd ?? c.total_usd, 'USD')}`
+                          : 'Pendiente')}
                       size="small"
                       sx={{
-                        bgcolor: c.status === 'pagado' ? 'rgba(45, 90, 30, 0.1)' : 'rgba(198, 40, 40, 0.08)',
-                        color: c.status === 'pagado' ? '#2D5A1E' : '#C62828', fontWeight: 600, fontSize: '0.75rem',
+                        bgcolor: c.status === 'pagado'
+                          ? 'rgba(45, 90, 30, 0.1)'
+                          : (c.pagos?.length > 0 ? 'rgba(249, 168, 37, 0.12)' : 'rgba(198, 40, 40, 0.08)'),
+                        color: c.status === 'pagado'
+                          ? '#2D5A1E'
+                          : (c.pagos?.length > 0 ? '#B8860B' : '#C62828'),
+                        fontWeight: 600, fontSize: '0.75rem',
                       }}
                     />
+                    {c.status === 'pagado' && c.payment_method && (
+                      <Typography variant="caption" sx={{ display: 'block', color: '#6B5344', fontSize: '0.62rem', mt: 0.3 }}>
+                        {c.payment_method}{c.reference ? ` · Ref ${c.reference}` : ''}
+                      </Typography>
+                    )}
                   </TableCell>
                   <TableCell align="center">
                     <Box sx={{ display: 'flex', gap: 0.5, justifyContent: 'center' }}>
                       <IconButton size="small" onClick={() => { setDetailCuenta(c); setDetailOpen(true) }} aria-label={`Ver detalle de cuenta #${c.id}`} sx={{ color: '#C9952A', '&:hover': { bgcolor: 'rgba(201, 149, 42, 0.1)' } }}>
                         <Visibility fontSize="small" />
                       </IconButton>
+                      {isAdmin && (
+                        <IconButton size="small" onClick={() => openEditDialog(c)} aria-label={`Editar cuenta #${c.id}`} sx={{ color: '#2D5A1E', '&:hover': { bgcolor: 'rgba(45, 90, 30, 0.1)' } }}>
+                          <Edit fontSize="small" />
+                        </IconButton>
+                      )}
+                      {isAdmin && (
+                        <IconButton size="small" onClick={() => confirmDelete(c)} aria-label={`Eliminar cuenta #${c.id}`} sx={{ color: '#C62828', '&:hover': { bgcolor: 'rgba(198, 40, 40, 0.1)' } }}>
+                          <Delete fontSize="small" />
+                        </IconButton>
+                      )}
                       {c.status === 'pendiente' && (
                         <Button size="small" variant="contained" startIcon={<CheckCircle sx={{ fontSize: 14 }} />}
-                          onClick={() => { setCuentaSeleccionada(c); setConfirmOpen(true) }}
-                          aria-label={`Marcar cuenta #${c.id} como pagada`}
+                          onClick={() => openCobroDialog(c)}
+                          aria-label={`Registrar cobro de la cuenta #${c.id}`}
                           sx={{ bgcolor: '#2D5A1E', borderRadius: 2, fontSize: '0.7rem', fontWeight: 600, '&:hover': { bgcolor: '#3A7A28' }, textTransform: 'none' }}>
                           Cobrar
                         </Button>
@@ -660,15 +855,6 @@ export default function Creditos() {
                   ))}
                 </Select>
               </FormControl>
-              <FormControl size="small" sx={{ minWidth: 120 }}>
-                <InputLabel id="moneda-label" sx={{ color: '#6B5344' }}>Moneda</InputLabel>
-                <Select labelId="moneda-label" value={currency} label="Moneda" onChange={e => setCurrency(e.target.value)}
-                  slotProps={{ select: { 'aria-label': 'Moneda de cobro' } }}
-                  sx={{ borderRadius: 2, bgcolor: '#F8F5F0', '& fieldset': { borderColor: 'rgba(45, 90, 30, 0.3)' }, '&:hover fieldset': { borderColor: '#2D5A1E' }, '&.Mui-focused fieldset': { borderColor: '#2D5A1E' } }}>
-                  <MenuItem value="BS">Bolívares (Bs.)</MenuItem>
-                  <MenuItem value="USD">Dólares ($)</MenuItem>
-                </Select>
-              </FormControl>
             </Box>
           </Box>
 
@@ -749,24 +935,24 @@ export default function Creditos() {
                 </Alert>
                 <Box sx={{ mt: 1.5, p: 1.5, borderRadius: 2, bgcolor: 'rgba(45, 90, 30, 0.04)', border: '1px dashed rgba(45, 90, 30, 0.2)' }}>
                   <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}><strong>Cliente:</strong> {clientName || '—'}</Typography>
-                  <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}><strong>Moneda:</strong> {currency === 'BS' ? 'Bolívares' : 'Dólares'}</Typography>
+                  <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}><strong>Deuda:</strong> en dólares ($), el método de pago se elige al cobrar</Typography>
                   <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}><strong>Plazo:</strong> {daysTerm} días (vence: {fechaVencimiento})</Typography>
-                  <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}><strong>Saldo:</strong> {money(totalCobrar, currency)}</Typography>
+                  <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}><strong>Saldo:</strong> {money(totalCobrar, 'USD')}</Typography>
                 </Box>
               </Box>
               <Box sx={{ textAlign: 'right', minWidth: 160 }}>
                 <Typography variant="caption" sx={{ color: '#6B5344', textTransform: 'uppercase', letterSpacing: '0.08em', fontSize: '0.65rem' }}>Total a cobrar</Typography>
-                <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 700, color: totalUSD > 0 ? '#2D5A1E' : '#6B5344', fontSize: '1.5rem', lineHeight: 1.2, whiteSpace: 'nowrap' }}>{money(totalCobrar, currency)}</Typography>
-                <Typography sx={{ fontSize: '0.72rem', color: '#6B5344' }}>({money(totalUSD, 'USD')} · tasa {tasaActual ? `Bs. ${tasaActual}` : 's/tasa'})</Typography>
+                <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 700, color: totalUSD > 0 ? '#2D5A1E' : '#6B5344', fontSize: '1.5rem', lineHeight: 1.2, whiteSpace: 'nowrap' }}>{money(totalCobrar, 'USD')}</Typography>
+                <Typography sx={{ fontSize: '0.72rem', color: '#6B5344' }}>(≈ Bs. {formatNumber(totalUSD * tasaActual)} · tasa {tasaActual ? `Bs. ${tasaActual}` : 's/tasa'})</Typography>
               </Box>
             </Box>
             <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1.5, mt: 2 }}>
               <Button onClick={() => setCreditDialogOpen(false)} sx={{ color: '#6B5344', fontWeight: 500, borderRadius: 2, px: 3, '&:hover': { bgcolor: 'rgba(107,83,68,0.08)' } }}>Cancelar</Button>
               <Button variant="contained" onClick={handleCreateCredit}
                 disabled={cart.length === 0 || submitting || !tasaActual || !clientName.trim()}
-                aria-label={`Registrar venta a crédito por ${money(totalCobrar, currency)}`}
+                aria-label={`Registrar venta a crédito por ${money(totalCobrar, 'USD')}`}
                 sx={{ background: 'linear-gradient(135deg, #2D5A1E 0%, #1E3D14 100%)', '&:hover': { background: 'linear-gradient(135deg, #3A7028 0%, #2D5A1E 100%)', transform: 'translateY(-1px)' }, px: 4, py: 1.2, borderRadius: 2, fontWeight: 600, fontSize: '0.95rem', boxShadow: '0 4px 14px rgba(45, 90, 30, 0.3)', transition: 'all 0.2s ease', '&.Mui-disabled': { background: 'rgba(45, 90, 30, 0.3)', color: 'rgba(255, 248, 240, 0.5)' } }}>
-                {submitting ? 'Registrando...' : `Registrar Crédito ${money(totalCobrar, currency)}`}
+                {submitting ? 'Registrando...' : `Registrar Crédito ${money(totalCobrar, 'USD')}`}
               </Button>
             </Box>
           </Box>
@@ -774,32 +960,141 @@ export default function Creditos() {
       </Dialog>
 
       {/* ══════════════════════════════════════════════════
-          DIALOG: Confirmar cobro
+          DIALOG: Registrar cobro (total o abono parcial)
           ══════════════════════════════════════════════════ */}
-      <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)} slotProps={{ paper: { sx: { borderRadius: 3, minWidth: 350 } } }} aria-labelledby="confirm-cobro-title">
+      <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)} slotProps={{ paper: { sx: { borderRadius: 3, minWidth: 420 } } }} aria-labelledby="confirm-cobro-title">
         <DialogTitle id="confirm-cobro-title" sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', bgcolor: '#2D5A1E', color: '#FFF8F0', py: 2, px: 3 }}>
-          <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 600 }}>Confirmar Cobro</Typography>
+          <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 600 }}>Registrar Cobro</Typography>
           <IconButton onClick={() => setConfirmOpen(false)} aria-label="Cerrar" sx={{ color: 'rgba(255,248,240,0.6)' }}><Close fontSize="small" /></IconButton>
         </DialogTitle>
         <DialogContent sx={{ pt: 3 }}>
           {cuentaSeleccionada && (
             <Box>
-              <Alert severity="info" sx={{ mb: 2, borderRadius: 2 }}>¿Estás seguro de que deseas marcar esta cuenta como pagada?</Alert>
-              <Box sx={{ p: 2, borderRadius: 2, bgcolor: 'rgba(45, 90, 30, 0.04)', border: '1px solid rgba(45, 90, 30, 0.15)' }}>
-                <Typography sx={{ fontWeight: 600, color: '#2C1810', mb: 1 }}>Detalles de la cuenta:</Typography>
-                <Typography variant="body2" sx={{ color: '#6B5344' }}><strong>Cliente:</strong> {cuentaSeleccionada.client_name}</Typography>
-                <Typography variant="body2" sx={{ color: '#6B5344' }}><strong>Total:</strong> {cuentaSeleccionada.currency === 'BS' ? `Bs. ${formatNumber(cuentaSeleccionada.total_bs)}` : `$ ${formatNumber(cuentaSeleccionada.total_usd)}`}</Typography>
-                <Typography variant="body2" sx={{ color: '#6B5344' }}><strong>Venta:</strong> #{cuentaSeleccionada.sale_id}</Typography>
-                {cuentaSeleccionada.due_date && <Typography variant="body2" sx={{ color: '#6B5344' }}><strong>Vence:</strong> {formatFechaCorta(cuentaSeleccionada.due_date)}</Typography>}
+              {/* Resumen de la deuda */}
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', p: 2, borderRadius: 2, bgcolor: 'rgba(45, 90, 30, 0.04)', border: '1px solid rgba(45, 90, 30, 0.15)', mb: 2 }}>
+                <Box>
+                  <Typography variant="body2" sx={{ color: '#6B5344' }}><strong>Cliente:</strong> {cuentaSeleccionada.client_name}</Typography>
+                  <Typography variant="body2" sx={{ color: '#6B5344' }}>Venta #{cuentaSeleccionada.sale_id}{cuentaSeleccionada.due_date ? ` · Vence ${formatFechaCorta(cuentaSeleccionada.due_date)}` : ''}</Typography>
+                  {cobroYaAbonado > 0.005 && (
+                    <Typography variant="body2" sx={{ color: '#B8860B', fontWeight: 600 }}>
+                      Ya abonado: {money(cobroYaAbonado, 'USD')} ({cuentaSeleccionada.pagos?.length || 0} pago{cuentaSeleccionada.pagos?.length === 1 ? '' : 's'})
+                    </Typography>
+                  )}
+                </Box>
+                <Box sx={{ textAlign: 'right' }}>
+                  <Typography variant="caption" sx={{ color: '#6B5344', textTransform: 'uppercase', fontSize: '0.6rem', letterSpacing: '0.06em' }}>Saldo a cobrar</Typography>
+                  <Typography sx={{ fontWeight: 700, color: '#2D5A1E', fontSize: '1.35rem', whiteSpace: 'nowrap' }}>{money(cobroSaldo, 'USD')}</Typography>
+                  <Typography variant="caption" sx={{ color: '#6B5344' }}>
+                    ≈ Bs. {formatNumber(cobroSaldo * (cobroTasa || 0))} · tasa del día
+                  </Typography>
+                </Box>
               </Box>
+
+              {/* Método de pago */}
+              <FormControl size="small" fullWidth sx={{ mb: 1.5 }}>
+                <InputLabel>Método de pago</InputLabel>
+                <Select
+                  value={cobroMetodo}
+                  label="Método de pago"
+                  onChange={e => setCobroMetodo(e.target.value)}
+                  renderValue={(val) =>
+                    val === 'Mixto'
+                      ? `Mixto ($ + ${cobroMixtoBs})`
+                      : (COBRO_PAYMENT_OPTIONS.find(o => o.value === val)?.label || val)}
+                  sx={{ borderRadius: 2, bgcolor: '#FFF8F0' }}
+                >
+                  {COBRO_PAYMENT_OPTIONS.map(opt => (
+                    <MenuItem key={opt.value} value={opt.value}>
+                      {opt.icon} {opt.label}
+                    </MenuItem>
+                  ))}
+                  <MenuItem value="Mixto">🔀 Mixto ($ efectivo + Bs)</MenuItem>
+                </Select>
+              </FormControl>
+
+              {/* Mixto: método en Bs y montos entregados */}
+              {cobroEsMixto && (
+                <Box sx={{ mb: 1.5, display: 'grid', gap: 1.5 }}>
+                  <FormControl size="small" fullWidth>
+                    <InputLabel>Método de pago en Bolívares</InputLabel>
+                    <Select
+                      value={cobroMixtoBs}
+                      label="Método de pago en Bolívares"
+                      onChange={e => setCobroMixtoBs(e.target.value)}
+                      sx={{ borderRadius: 2, bgcolor: '#FFF8F0' }}
+                    >
+                      {COBRO_PAYMENT_OPTIONS.filter(o => o.currency === 'BS').map(opt => (
+                        <MenuItem key={opt.value} value={opt.value}>{opt.icon} {opt.label}</MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1.5 }}>
+                    <TextField
+                      label="Recibe ($USD)" size="small" type="number"
+                      value={cobroRecUsd} onChange={e => setCobroRecUsd(e.target.value)}
+                      slotProps={{ htmlInput: { min: 0, step: 0.01 } }}
+                    />
+                    <TextField
+                      label={`Recibe (Bs)${cobroTasa ? ` · tasa ${cobroTasa}` : ''}`} size="small" type="number"
+                      value={cobroRecBs} onChange={e => setCobroRecBs(e.target.value)}
+                      slotProps={{ htmlInput: { min: 0, step: 0.01 } }}
+                    />
+                  </Box>
+                  {cobroRecibeTotal > 0 && (
+                    <Typography sx={{ fontSize: '0.8rem', fontWeight: 600, color: cobroInsuficiente ? '#C62828' : '#2D5A1E' }}>
+                      {cobroInsuficiente
+                        ? `Faltan ${money(cobroFaltaUsd * cobroTasa, 'BS')} (${money(cobroFaltaUsd, 'USD')})`
+                        : `Cubre ${money(Math.min(cobroRecibeTotal, montoAbonar), 'USD')}${cobroRecibeTotal > montoAbonar + 0.005 ? ` · sobra ${money(cobroRecibeTotal - montoAbonar, 'USD')}` : ''}`}
+                    </Typography>
+                  )}
+                </Box>
+              )}
+
+              {/* Referencia bancaria */}
+              {cobroNecesitaRef && (
+                <TextField
+                  label={`Referencia bancaria (${cobroMetodoRef})`}
+                  size="small" fullWidth required
+                  value={cobroRef} onChange={e => setCobroRef(e.target.value)}
+                  placeholder="Ej: 00845123"
+                  sx={{ mb: 1.5, '& .MuiOutlinedInput-root': { borderRadius: 2, bgcolor: '#FFF8F0' } }}
+                />
+              )}
+
+              {/* Abono parcial (opcional) */}
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mt: 0.5 }}>
+                <Typography sx={{ fontSize: '0.78rem', color: '#6B5344' }}>¿El cliente abona solo una parte?</Typography>
+                <Switch size="small" checked={abonoActivo} onChange={e => { setAbonoActivo(e.target.checked); if (!e.target.checked) setAbonoMonto('') }} />
+              </Box>
+              {abonoActivo && (
+                <Box sx={{ mt: 1.5, display: 'grid', gridTemplateColumns: '1fr auto', gap: 1.5, alignItems: 'start' }}>
+                  <TextField
+                    label="Monto del abono ($USD)" size="small" type="number"
+                    value={abonoMonto} onChange={e => setAbonoMonto(e.target.value)}
+                    error={abonoExcede || (abonoSolicitado > 0 && abonoSolicitado <= 0)}
+                    helperText={abonoExcede ? `No puede exceder el saldo (${money(cobroSaldo, 'USD')})` : ' '}
+                    slotProps={{ htmlInput: { min: 0.01, max: cobroSaldo, step: 0.01 } }}
+                  />
+                  <Box sx={{ textAlign: 'right', pt: 1 }}>
+                    <Typography variant="caption" sx={{ color: '#6B5344', display: 'block' }}>Nuevo saldo tras el abono</Typography>
+                    <Typography sx={{ fontWeight: 700, color: '#C9952A' }}>
+                      {money(Math.max(cobroSaldo - montoAbonar, 0), 'USD')}
+                    </Typography>
+                  </Box>
+                </Box>
+              )}
             </Box>
           )}
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
           <Button onClick={() => setConfirmOpen(false)} sx={{ color: '#6B5344' }}>Cancelar</Button>
-          <Button variant="contained" onClick={handleMarcarPagada} disabled={pagando} startIcon={<CheckCircle />}
+          <Button variant="contained" onClick={handleRegistrarCobro}
+            disabled={pagando || !cobroTasa || abonoExcede || cobroInsuficiente}
+            startIcon={<CheckCircle />}
             sx={{ bgcolor: '#2D5A1E', borderRadius: 2, fontWeight: 600, '&:hover': { bgcolor: '#3A7A28' } }}>
-            {pagando ? 'Procesando...' : 'Marcar como Pagada'}
+            {pagando ? 'Procesando...' : (abonoActivo && abonoSolicitado > 0 && abonoSolicitado < cobroSaldo - 0.005)
+              ? `Registrar Abono ${money(montoAbonar, 'USD')}`
+              : 'Registrar Cobro Completo'}
           </Button>
         </DialogActions>
       </Dialog>
@@ -869,6 +1164,38 @@ export default function Creditos() {
                 <Box sx={{ mt: 2, p: 2, borderRadius: 2, bgcolor: 'rgba(45, 90, 30, 0.04)', border: '1px solid rgba(45, 90, 30, 0.15)' }}>
                   <Typography variant="caption" sx={{ color: '#6B5344', fontSize: '0.65rem', textTransform: 'uppercase' }}>Fecha de Pago</Typography>
                   <Typography sx={{ fontWeight: 600, color: '#2D5A1E' }}>{formatFecha(detailCuenta.paid_at)}</Typography>
+                  {detailCuenta.payment_method && (
+                    <Typography variant="body2" sx={{ color: '#6B5344', mt: 0.5 }}>
+                      Pagado con <strong>{detailCuenta.payment_method}</strong>
+                      {detailCuenta.reference ? ` · Ref ${detailCuenta.reference}` : ''}
+                    </Typography>
+                  )}
+                </Box>
+              )}
+              {detailCuenta.pagos?.length > 0 && (
+                <Box sx={{ mt: 2 }}>
+                  <Typography variant="caption" sx={{ color: '#6B5344', fontSize: '0.65rem', textTransform: 'uppercase' }}>Historial de cobros</Typography>
+                  {detailCuenta.pagos.map((p, i) => (
+                    <Box key={p.id} sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', py: 1, borderBottom: i < detailCuenta.pagos.length - 1 ? '1px dashed rgba(107, 83, 68, 0.15)' : 'none' }}>
+                      <Box>
+                        <Typography variant="body2" sx={{ color: '#2C1810', fontWeight: 500 }}>
+                          {p.payment_method}{p.reference ? ` · Ref ${p.reference}` : ''}
+                        </Typography>
+                        <Typography variant="caption" sx={{ color: '#6B5344', fontSize: '0.65rem' }}>
+                          {formatFecha(p.created_at)} · tasa Bs. {p.rate_usd}{p.registrado_por ? ` · por ${p.registrado_por}` : ''}
+                        </Typography>
+                      </Box>
+                      <Box sx={{ textAlign: 'right' }}>
+                        <Typography variant="body2" sx={{ fontWeight: 700, color: '#2D5A1E' }}>{money(p.monto_usd, 'USD')}</Typography>
+                        <Typography variant="caption" sx={{ color: '#6B5344', fontSize: '0.65rem' }}>Bs. {formatNumber(p.monto_bs)}</Typography>
+                      </Box>
+                    </Box>
+                  ))}
+                  {detailCuenta.status === 'pendiente' && (
+                    <Typography variant="body2" sx={{ mt: 1, fontWeight: 600, color: '#B8860B' }}>
+                      Saldo pendiente: {money(detailCuenta.saldo_usd ?? detailCuenta.total_usd, 'USD')}
+                    </Typography>
+                  )}
                 </Box>
               )}
               {detailCuenta.notes && (
@@ -882,6 +1209,124 @@ export default function Creditos() {
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
           <Button onClick={() => setDetailOpen(false)} sx={{ color: '#6B5344' }}>Cerrar</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* ══════════════════════════════════════════════════
+          DIALOG: Editar cuenta por cobrar (solo admin)
+          ══════════════════════════════════════════════════ */}
+      <Dialog open={editOpen} onClose={() => setEditOpen(false)} maxWidth="xs" fullWidth slotProps={{ paper: { sx: { borderRadius: 3, overflow: 'hidden' } } }} aria-labelledby="edit-cuenta-title">
+        <DialogTitle id="edit-cuenta-title" sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', bgcolor: '#2D5A1E', color: '#FFF8F0', py: 2, px: 3 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+            <Edit sx={{ fontSize: 22 }} />
+            <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 600, fontSize: '1.1rem' }}>
+              Editar Cuenta #{editCuenta?.id}
+            </Typography>
+          </Box>
+          <IconButton onClick={() => setEditOpen(false)} aria-label="Cerrar edición" size="small" sx={{ color: 'rgba(255,248,240,0.6)', '&:hover': { color: '#FFF8F0', bgcolor: 'rgba(255,248,240,0.1)' } }}>
+            <Close fontSize="small" />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent sx={{ pt: 3 }}>
+          {editCuenta && (
+            <Box sx={{ display: 'grid', gap: 2 }}>
+              <TextField
+                label="Nombre del cliente"
+                value={editCliente}
+                onChange={e => setEditCliente(e.target.value)}
+                required
+                fullWidth
+                size="small"
+                slotProps={{ htmlInput: { 'aria-required': 'true' } }}
+                sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2, bgcolor: '#F8F5F0' } }}
+              />
+              <FormControl size="small" fullWidth>
+                <InputLabel id="edit-plazo-label">Plazo de pago</InputLabel>
+                <Select
+                  labelId="edit-plazo-label"
+                  value={editPlazo}
+                  label="Plazo de pago"
+                  onChange={e => setEditPlazo(e.target.value)}
+                  slotProps={{ select: { 'aria-label': 'Nuevo plazo de pago en días' } }}
+                  sx={{ borderRadius: 2, bgcolor: '#F8F5F0' }}
+                >
+                  {TERM_OPTIONS.map(opt => (
+                    <MenuItem key={opt.value} value={opt.value}>
+                      <CalendarMonth sx={{ fontSize: 18, mr: 1, color: '#2D5A1E' }} />
+                      {opt.label}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <TextField
+                label="Notas"
+                value={editNotas}
+                onChange={e => setEditNotas(e.target.value)}
+                multiline
+                rows={2}
+                fullWidth
+                size="small"
+                placeholder="Observaciones de la cuenta…"
+                sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2, bgcolor: '#F8F5F0' } }}
+              />
+              <Box sx={{ p: 1.5, borderRadius: 2, bgcolor: 'rgba(45, 90, 30, 0.04)', border: '1px dashed rgba(45, 90, 30, 0.2)' }}>
+                <Typography sx={{ fontSize: '0.78rem', color: '#6B5344' }}>
+                  <strong>Cliente:</strong> {editCliente || '—'}
+                </Typography>
+                <Typography sx={{ fontSize: '0.78rem', color: '#6B5344' }}>
+                  <strong>Saldo:</strong> {editCuenta.currency === 'BS' ? `Bs. ${formatNumber(editCuenta.total_bs)}` : `$ ${formatNumber(editCuenta.total_usd)}`}
+                </Typography>
+                <Typography sx={{ fontSize: '0.78rem', color: '#6B5344' }}>
+                  <strong>Nuevo vencimiento:</strong> {nuevoVencimiento || '—'}
+                </Typography>
+              </Box>
+              <Alert severity="info" sx={{ borderRadius: 2, fontSize: '0.78rem' }}>
+                Para cambiar los productos o el monto de esta venta a crédito, edita la venta #{editCuenta.sale_id} desde el módulo de Ventas.
+              </Alert>
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => setEditOpen(false)} sx={{ color: '#6B5344' }}>Cancelar</Button>
+          <Button variant="contained" onClick={handleEditSave} disabled={editSaving || !editCliente.trim()} startIcon={<Edit />}
+            sx={{ bgcolor: '#2D5A1E', borderRadius: 2, fontWeight: 600, '&:hover': { bgcolor: '#3A7A28' } }}>
+            {editSaving ? 'Guardando…' : 'Guardar cambios'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* ══════════════════════════════════════════════════
+          DIALOG: Confirmar eliminación de cuenta (solo admin)
+          ══════════════════════════════════════════════════ */}
+      <Dialog open={deleteOpen} onClose={() => setDeleteOpen(false)} maxWidth="xs" fullWidth slotProps={{ paper: { sx: { borderRadius: 3, overflow: 'hidden' } } }} aria-labelledby="delete-cuenta-title">
+        <DialogTitle id="delete-cuenta-title" sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', bgcolor: '#C62828', color: '#FFF8F0', py: 2, px: 3 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+            <Delete />
+            <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 600, fontSize: '1.1rem' }}>
+              Eliminar Cuenta #{deleteTarget?.id}
+            </Typography>
+          </Box>
+          <IconButton onClick={() => setDeleteOpen(false)} aria-label="Cerrar" size="small" sx={{ color: 'rgba(255,248,240,0.6)' }}>
+            <Close fontSize="small" />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent sx={{ pt: 3 }}>
+          <Typography sx={{ color: '#2C1810', fontSize: '0.9rem', mb: 1.5 }}>
+            ¿Seguro que deseas eliminar esta cuenta por cobrar? Esta acción <b>no se puede deshacer</b>.
+          </Typography>
+          {deleteTarget && (
+            <Alert severity="warning" sx={{ borderRadius: 2, fontSize: '0.8rem' }}>
+              También se eliminará la <b>venta #{deleteTarget.sale_id}</b> asociada y sus productos se
+              <b> devolverán al inventario</b>.
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => setDeleteOpen(false)} sx={{ color: '#6B5344' }}>Cancelar</Button>
+          <Button variant="contained" onClick={handleDeleteConfirmado} disabled={deleting} startIcon={<Delete />}
+            sx={{ bgcolor: '#C62828', borderRadius: 2, fontWeight: 600, '&:hover': { bgcolor: '#8E1B1B' } }}>
+            {deleting ? 'Eliminando…' : 'Eliminar'}
+          </Button>
         </DialogActions>
       </Dialog>
 

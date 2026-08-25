@@ -59,6 +59,8 @@ def habilitar_columnas(db):
             "days_term": "INTEGER DEFAULT 10",
             "due_date": "DATE",
             "notified": "BOOLEAN DEFAULT 0",
+            "payment_method": "VARCHAR",
+            "reference": "VARCHAR",
         },
     }
     for tabla, columnas in table_columns.items():
@@ -77,6 +79,10 @@ def habilitar_columnas(db):
     try:
         db.execute(text("UPDATE users SET role='admin' WHERE username='admin'"))
         db.execute(text("UPDATE users SET role='vendedor' WHERE username<>'admin' AND (role IS NULL OR role='')"))
+
+        # Las deudas a crédito quedan denominadas en dólares: el método de pago
+        # y la conversión a Bs se definen al cobrar (tasa del día del pago).
+        db.execute(text("UPDATE cuentas_credito SET currency='USD' WHERE currency IS NULL OR currency<>'USD'"))
     except OperationalError:
         pass
 

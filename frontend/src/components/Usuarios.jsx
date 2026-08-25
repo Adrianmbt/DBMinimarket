@@ -224,10 +224,10 @@ export default function Usuarios() {
                         {u.username.charAt(0).toUpperCase()}
                       </Avatar>
                       <Box>
-                        <Typography sx={{ fontWeight: 600, fontSize: '0.85rem', color: '#2C1810', display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                        <Typography component="span" sx={{ fontWeight: 600, fontSize: '0.85rem', color: '#2C1810', display: 'flex', alignItems: 'center', gap: 0.5 }}>
                           {u.username}
                           {soyYo && (
-                            <Chip label="tú" size="small" sx={{ height: 18, fontSize: '0.6rem', bgcolor: '#C9952A', color: '#FFF8F0', fontWeight: 600 }} />
+                            <Chip component="span" label="tú" size="small" sx={{ height: 18, fontSize: '0.6rem', bgcolor: '#C9952A', color: '#FFF8F0', fontWeight: 600 }} />
                           )}
                         </Typography>
                         <Typography variant="caption" sx={{ color: '#6B5344' }}>ID #{u.id}</Typography>

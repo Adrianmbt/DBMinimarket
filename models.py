@@ -186,7 +186,48 @@ class CuentaCredito(Base):
     due_date = Column(Date, nullable=True)             # Fecha límite de pago (created_at + days_term)
     notified = Column(Boolean, default=False)          # True si ya se notificó que está por vencer
 
+    # Cobro: método con el que pagó el cliente (se registra al momento del pago)
+    payment_method = Column(String, nullable=True)
+    reference = Column(String, nullable=True)
+
+    # Abonos/cobros aplicados a esta cuenta
+    pagos = relationship(
+        "PagoCredito",
+        back_populates="cuenta",
+        cascade="all, delete-orphan",
+        order_by="PagoCredito.created_at",
+    )
+
     sale = relationship("Sale", foreign_keys=[sale_id])
+
+    @property
+    def saldo_usd(self) -> float:
+        """Deuda restante en USD: total menos la suma de los abonos registrados."""
+        abonado = sum((p.monto_usd or 0.0) for p in (self.pagos or []))
+        return round(max((self.total_usd or 0.0) - abonado, 0.0), 2)
+
+
+class PagoCredito(Base):
+    """Cobro (total o abono parcial) registrado sobre una cuenta por cobrar.
+
+    La tasa guardada es la vigente el día del pago: los bolívares se calculan
+    con esa tasa, no con la de la venta original.
+    """
+    __tablename__ = "pagos_credito"
+
+    id = Column(Integer, primary_key=True, index=True)
+    cuenta_id = Column(Integer, ForeignKey("cuentas_credito.id"), nullable=False, index=True)
+    monto_usd = Column(Float, nullable=False)           # Monto aplicado a la deuda (USD)
+    monto_bs = Column(Float, nullable=False)            # Equivalente en Bs (tasa del día del pago)
+    rate_usd = Column(Float, nullable=False)            # Tasa BCV usada ese día
+    payment_method = Column(String, nullable=False)     # Método con el que pagó
+    reference = Column(String, nullable=True)           # Referencia bancaria si es electrónico
+    received_bs = Column(Float, nullable=True)          # Mixto: Bs entregados
+    received_usd = Column(Float, nullable=True)         # Mixto: $ entregados
+    registrado_por = Column(String, nullable=True)      # Usuario que registró el cobro
+    created_at = Column(DateTime, default=utcnow, index=True)
+
+    cuenta = relationship("CuentaCredito", back_populates="pagos")
 
 
 class ExchangeRate(Base):

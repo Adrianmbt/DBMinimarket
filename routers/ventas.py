@@ -1,17 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, selectinload
-from sqlalchemy import func
 from collections import OrderedDict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from database import get_db
 from models import Product, Sale, SaleDetail, ExchangeRate, CierreDiario, CuentaCredito
 from services.bcv import DEFAULT_RATE
 from services.pdf import generar_pdf_cierre, generar_pdf_factura, BS_METHODS
 from schemas import (
-    SaleCreate, SaleResponse, CierreStatus, ReporteResumen, MetodoResumen, CierreResponse,
+    SaleCreate, SaleUpdate, SaleResponse, CierreStatus, ReporteResumen, MetodoResumen, CierreResponse,
 )
-from security import get_current_user
+from security import get_current_user, requiere_admin
 
 router = APIRouter(prefix="/api/ventas", tags=["Ventas"])
 
@@ -22,13 +21,21 @@ IGTF_RATE = 0.03
 IGTF_METHODS = {"Dólares Efectivo"}
 
 
-def _desglose_impuestos(total: float, payment_method: str | None):
+def _desglose_impuestos(total: float, payment_method: str | None, fraccion_usd: float = 0.0):
     """Dado el total final (impuestos incluidos), deriva base, IVA e IGTF.
 
     Base = total / (1 + IVA + IGTF); el IGTF solo aplica a métodos marcados.
+    En pagos mixtos ($ efectivo + método en Bs) el IGTF aplica de forma
+    proporcional a la porción pagada en dólares en efectivo (fraccion_usd).
     Verificación: base + iva + igtf == total.
     """
-    igtf = IGTF_RATE if (payment_method or "") in IGTF_METHODS else 0.0
+    metodo = payment_method or ""
+    if metodo in IGTF_METHODS:
+        igtf = IGTF_RATE
+    elif metodo.startswith("Mixto"):
+        igtf = IGTF_RATE * min(max(fraccion_usd, 0.0), 1.0)
+    else:
+        igtf = 0.0
     if total <= 0:
         return 0.0, 0.0, 0.0
     factor = 1 + IVA_RATE + igtf
@@ -53,12 +60,43 @@ def _default_rate(db: Session) -> float:
     return db_rate.rate if db_rate and db_rate.rate else DEFAULT_RATE
 
 
+def _validar_caja_abierta(db: Session, venta: Sale):
+    """Bloquea modificar/eliminar una venta si la caja de su día ya fue cerrada (Reporte Z).
+
+    Los timestamps se guardan en UTC; convertimos al día local para ubicar el cierre.
+    """
+    dia_local = venta.created_at.replace(tzinfo=timezone.utc).astimezone().date()
+    if db.query(CierreDiario).filter(CierreDiario.fecha == dia_local).first():
+        raise HTTPException(
+            409,
+            f"La caja del {dia_local.isoformat()} ya fue cerrada con el Reporte Z. "
+            "No se puede modificar ni eliminar esta venta.",
+        )
+
+
+def _rango_dia_utc(dia):
+    """Intervalo [inicio, fin) del día local `dia` expresado en UTC.
+
+    Los timestamps se guardan en UTC (models.utcnow), pero el "día" del
+    negocio es el local (Venezuela). Convertimos la medianoche local a UTC
+    para que una venta de las 9:00 pm cuente en el día correcto.
+    """
+    inicio_local = datetime.combine(dia, datetime.min.time()).astimezone()
+    fin_local = inicio_local + timedelta(days=1)
+    return (
+        inicio_local.astimezone(timezone.utc).replace(tzinfo=None),
+        fin_local.astimezone(timezone.utc).replace(tzinfo=None),
+    )
+
+
 def _ventas_de(db: Session, dia) -> list[Sale]:
     """Ventas de un día (fecha local), ordenadas cronológicamente."""
+    desde, hasta = _rango_dia_utc(dia)
     return db.query(Sale).options(
         selectinload(Sale.details).selectinload(SaleDetail.product)
     ).filter(
-        func.date(Sale.created_at) == dia
+        Sale.created_at >= desde,
+        Sale.created_at < hasta,
     ).order_by(Sale.created_at.asc()).all()
 
 
@@ -81,7 +119,12 @@ def _resumen_fecha(db: Session, dia):
         total_iva += v.iva_amount or 0.0
         total_igtf += v.igtf_amount or 0.0
         rate = v.rate_usd or taux or 1.0
-        if m in BS_METHODS:
+        if (v.payment_method or "").startswith("Mixto"):
+            # Mixto ($ + Bs): a bolívares entra exactamente lo recibido en Bs.
+            bs = v.received_bs or 0.0
+            g["bs"] += bs
+            total_bs += bs
+        elif m in BS_METHODS:
             bs = (v.total or 0.0) * rate
             g["bs"] += bs
             total_bs += bs
@@ -212,7 +255,8 @@ def listar_ventas(
     )
     if fecha:
         dia = _parse_fecha(fecha)
-        q = q.filter(func.date(Sale.created_at) == dia)
+        desde, hasta = _rango_dia_utc(dia)
+        q = q.filter(Sale.created_at >= desde, Sale.created_at < hasta)
     return q.order_by(Sale.created_at.desc()).all()
 
 
@@ -326,11 +370,16 @@ def crear_venta(
                     raise HTTPException(400, "El monto recibido es menor al total a cobrar")
                 change_usd = round(received_total_usd - expected_usd, 2)
 
+    # Desglose de impuestos. En pagos mixtos el IGTF aplica proporcional
+    # a la porción cubierta con dólares en efectivo.
+    fraccion_usd = (received_usd / total) if total > 0 else 0.0
+    base_v, iva_v, igtf_v = _desglose_impuestos(total, venta_data.payment_method, fraccion_usd)
+
     venta = Sale(
         total=total,
-        base_amount=_desglose_impuestos(total, venta_data.payment_method)[0],
-        iva_amount=_desglose_impuestos(total, venta_data.payment_method)[1],
-        igtf_amount=_desglose_impuestos(total, venta_data.payment_method)[2],
+        base_amount=base_v,
+        iva_amount=iva_v,
+        igtf_amount=igtf_v,
         payment_method=venta_data.payment_method,
         client_name=venta_data.client_name,
         reference=venta_data.reference,
@@ -355,7 +404,9 @@ def crear_venta(
             client_name=venta_data.client_name.strip(),
             total_usd=round(total, 2),
             total_bs=round(total_bs_calc, 2),
-            currency=currency,
+            # La deuda queda denominada en dólares: el método de pago se
+            # define al cobrar, convirtiendo a Bs con la tasa de ese día.
+            currency="USD",
             rate_usd=rate,
             status="pendiente",
             notes=venta_data.reference,
@@ -370,3 +421,200 @@ def crear_venta(
     db.commit()
     db.refresh(venta)
     return venta
+
+
+def _cuenta_de(db: Session, venta: Sale) -> CuentaCredito | None:
+    """Ubica la cuenta por cobrar asociada a una venta a crédito."""
+    if venta.cuenta_id:
+        cuenta = db.query(CuentaCredito).filter(CuentaCredito.id == venta.cuenta_id).first()
+        if cuenta:
+            return cuenta
+    return db.query(CuentaCredito).filter(CuentaCredito.sale_id == venta.id).first()
+
+
+@router.put("/{id}", response_model=SaleResponse)
+def actualizar_venta(
+    id: int,
+    venta_data: SaleUpdate,
+    db: Session = Depends(get_db),
+    user: object = Depends(get_current_user),
+):
+    """Actualiza una venta existente (solo administrador).
+
+    Campos editables: método de pago, cliente, referencia e items.
+    Si cambian los items, el stock original se devuelve al inventario y el
+    nuevo detalle se valida y descuenta; total e impuestos se recalculan.
+    En ventas a crédito también se actualiza su cuenta por cobrar.
+    No se permite editar ventas de días con caja cerrada (Reporte Z).
+    """
+    requiere_admin(user)
+
+    venta = db.query(Sale).options(
+        selectinload(Sale.details).selectinload(SaleDetail.product)
+    ).filter(Sale.id == id).first()
+    if not venta:
+        raise HTTPException(404, "Venta no encontrada")
+
+    _validar_caja_abierta(db, venta)
+
+    # ── Items: reemplazo del detalle (devuelve stock y vuelve a descontar) ──
+    if venta_data.items is not None:
+        for d in list(venta.details):
+            prod = db.get(Product, d.product_id)
+            if prod:
+                prod.stock = (prod.stock or 0) + d.quantity
+        db.flush()
+
+        # Agregar cantidades por producto (un mismo producto no puede venir dos veces)
+        cantidades: dict[int, int] = {}
+        for item in venta_data.items:
+            cantidades[item.product_id] = cantidades.get(item.product_id, 0) + item.quantity
+
+        productos_nuevos: dict[int, Product] = {}
+        for pid, qty in cantidades.items():
+            prod = db.get(Product, pid)
+            if not prod:
+                raise HTTPException(404, f"Producto {pid} no encontrado")
+            if prod.stock is None or prod.stock < qty:
+                raise HTTPException(400, f"Stock insuficiente para {prod.name}")
+            productos_nuevos[pid] = prod
+
+        # Conservar el precio congelado de la venta original cuando el producto ya estaba
+        precios_previos = {d.product_id: (d.price_at_sale, d.cost_price) for d in venta.details}
+        nuevos_detalles = []
+        total = 0.0
+        for pid, qty in cantidades.items():
+            prod = productos_nuevos[pid]
+            precio, costo = precios_previos.get(pid, (prod.sale_price, prod.cost_price))
+            if prod.sale_unit == "peso":
+                subtotal = precio * (qty / 1000.0)
+            else:
+                subtotal = precio * qty
+            total += subtotal
+            nuevos_detalles.append(SaleDetail(
+                product_id=pid,
+                quantity=qty,
+                price_at_sale=precio,
+                cost_price=costo,
+            ))
+            prod.stock -= qty
+
+        venta.details = nuevos_detalles
+        venta.total = round(total, 2)
+
+        # Mantener sincronizada la cuenta por cobrar de una venta a crédito
+        if venta.is_credit:
+            cuenta = _cuenta_de(db, venta)
+            if cuenta:
+                cuenta.total_usd = round(venta.total, 2)
+                tasa = venta.rate_usd or _default_rate(db) or 1.0
+                cuenta.total_bs = round(venta.total * tasa, 2)
+
+    # ── Método de pago ──
+    if venta_data.payment_method is not None:
+        metodo = venta_data.payment_method.strip()
+        if not metodo:
+            raise HTTPException(400, "El método de pago no puede quedar vacío")
+        if venta.is_credit and metodo != "Crédito":
+            raise HTTPException(400, "Una venta a crédito no puede cambiar de método de pago")
+        if not venta.is_credit and metodo == "Crédito":
+            raise HTTPException(400, "Las ventas a crédito se registran desde el módulo de Créditos")
+        venta.payment_method = metodo
+
+    # ── Cliente ──
+    if venta_data.client_name is not None:
+        nombre = venta_data.client_name.strip() or None
+        if venta.is_credit and not nombre:
+            raise HTTPException(400, "El cliente es obligatorio en ventas a crédito")
+        venta.client_name = nombre
+        if venta.is_credit:
+            cuenta = _cuenta_de(db, venta)
+            if cuenta:
+                cuenta.client_name = nombre or ""
+
+    # ── Referencia / nota ──
+    if venta_data.reference is not None:
+        ref = venta_data.reference.strip() or None
+        venta.reference = ref
+        if venta.is_credit:
+            cuenta = _cuenta_de(db, venta)
+            if cuenta:
+                cuenta.notes = ref
+
+    # ── Cobro recibido (solo ventas normales): valida y recalcula el cambio ──
+    if not venta.is_credit and (venta_data.received_bs is not None or venta_data.received_usd is not None):
+        received_bs = venta_data.received_bs or 0.0
+        received_usd = venta_data.received_usd or 0.0
+        tasa = venta.rate_usd or _default_rate(db) or 1.0
+        metodo = venta.payment_method or ""
+        moneda_usd = metodo.startswith("Mixto") or metodo == "Dólares Efectivo"
+        change_bs = change_usd = None
+
+        if received_bs > 0 or received_usd > 0:
+            if moneda_usd:
+                recibido = received_usd + (received_bs / tasa if tasa else 0.0)
+                if recibido < venta.total - 0.005:
+                    raise HTTPException(400, "El monto recibido es menor al total a cobrar")
+                change_usd = round(recibido - venta.total, 2)
+            else:
+                esperado_bs = venta.total * tasa
+                recibido = received_bs + received_usd * tasa
+                if recibido < esperado_bs - 0.005:
+                    raise HTTPException(400, "El monto recibido es menor al total a cobrar")
+                change_bs = round(recibido - esperado_bs, 2)
+
+        venta.received_bs = received_bs or None
+        venta.received_usd = received_usd or None
+        venta.change_bs = change_bs
+        venta.change_usd = change_usd
+
+    # ── Recalcular impuestos con el estado final (total, método y cobro) ──
+    fraccion_usd = ((venta.received_usd or 0.0) / venta.total) if venta.total > 0 else 0.0
+    base_v, iva_v, igtf_v = _desglose_impuestos(venta.total, venta.payment_method, fraccion_usd)
+    venta.base_amount = base_v
+    venta.iva_amount = iva_v
+    venta.igtf_amount = igtf_v
+
+    db.commit()
+    return db.query(Sale).options(
+        selectinload(Sale.details).selectinload(SaleDetail.product)
+    ).filter(Sale.id == id).first()
+
+
+@router.delete("/{id}")
+def eliminar_venta(
+    id: int,
+    db: Session = Depends(get_db),
+    user: object = Depends(get_current_user),
+):
+    """Elimina una venta (solo administrador).
+
+    Devuelve los productos al inventario y, si era venta a crédito, elimina
+    también su cuenta por cobrar. No se permite eliminar ventas de días con
+    caja cerrada (Reporte Z).
+    """
+    requiere_admin(user)
+
+    venta = db.query(Sale).options(
+        selectinload(Sale.details)
+    ).filter(Sale.id == id).first()
+    if not venta:
+        raise HTTPException(404, "Venta no encontrada")
+
+    _validar_caja_abierta(db, venta)
+
+    # Devolver el stock reservado por cada detalle
+    for d in venta.details:
+        prod = db.get(Product, d.product_id)
+        if prod:
+            prod.stock = (prod.stock or 0) + d.quantity
+
+    # Eliminar la cuenta por cobrar asociada si existe
+    cuenta = _cuenta_de(db, venta)
+    if cuenta:
+        db.delete(cuenta)
+        venta.cuenta_id = None
+
+    db.delete(venta)  # el cascade elimina los detalles
+    db.commit()
+    return {"ok": True, "message": f"Venta #{id} eliminada. El stock fue devuelto al inventario."}

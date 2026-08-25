@@ -2,6 +2,8 @@ import api from './axios'
 
 export const getVentas = (fecha) => api.get('/ventas', { params: fecha ? { fecha } : {} })
 export const createVenta = (data) => api.post('/ventas', data)
+export const updateVenta = (id, data) => api.put(`/ventas/${id}`, data)
+export const deleteVenta = (id) => api.delete(`/ventas/${id}`)
 export const getEstadoCierre = () => api.get('/ventas/cierre/estado')
 export const getResumenDia = (fecha) => api.get('/ventas/resumen', { params: { fecha } })
 export const cerrarCaja = () => api.post('/ventas/cierre', null, { responseType: 'blob' })
