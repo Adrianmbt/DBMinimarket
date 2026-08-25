@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
 import {
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
-  Paper, Button, TextField, Typography, IconButton, Snackbar, Box, Chip, Avatar, Tooltip, Alert
+  Paper, Button, TextField, Typography, IconButton, Snackbar, Box, Chip, Avatar, Tooltip, Alert,
+  Dialog, DialogTitle, DialogContent, DialogActions
 } from '@mui/material'
-import { Add, ShoppingCart, Visibility, PictureAsPdf, Search } from '@mui/icons-material'
-import { getCompras, descargarPdfCompra } from '../api/compras'
+import { Add, ShoppingCart, Visibility, PictureAsPdf, Search, Edit, Delete } from '@mui/icons-material'
+import { getCompras, descargarPdfCompra, deleteCompra } from '../api/compras'
 import Paginador from './Paginador'
 import { usePaginacion } from '../hooks/usePaginacion'
 import NuevaCompraDialog from './NuevaCompraDialog'
@@ -52,10 +53,19 @@ const qtyDesc = (d) => {
 }
 
 export default function Compras() {
+  const rawUser = typeof window !== 'undefined' ? (localStorage.getItem('user') || sessionStorage.getItem('user')) : null
+  const user = JSON.parse(rawUser || '{}')
+  const isAdmin = user.role === 'admin'
+
   const [compras, setCompras] = useState([])
   const [openCreate, setOpenCreate] = useState(false)
+  const [openEdit, setOpenEdit] = useState(false)
+  const [editCompra, setEditCompra] = useState(null)
   const [openView, setOpenView] = useState(false)
   const [viewCompra, setViewCompra] = useState(null)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState(null)
+  const [deleting, setDeleting] = useState(false)
   const [snack, setSnack] = useState({ open: false, msg: '', severity: 'success' })
   const [busquedaCompras, setBusquedaCompras] = useState('')
   const comprasFiltradas = (() => {
@@ -85,6 +95,34 @@ export default function Compras() {
       await descargarPdfCompra(id)
     } catch {
       setSnack({ open: true, msg: 'Error al generar el PDF', severity: 'error' })
+    }
+  }
+
+  const openEditDialog = (c) => {
+    if (!isAdmin) return
+    setEditCompra(c)
+    setOpenEdit(true)
+  }
+
+  const confirmDelete = (c) => {
+    setDeleteTarget(c)
+    setDeleteOpen(true)
+  }
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return
+    setDeleting(true)
+    try {
+      await deleteCompra(deleteTarget.id)
+      setSnack({ open: true, msg: `Compra #${deleteTarget.id} eliminada`, severity: 'success' })
+      setDeleteOpen(false)
+      setDeleteTarget(null)
+      load()
+    } catch (err) {
+      const msg = err.response?.data?.detail || 'Error al eliminar la compra'
+      setSnack({ open: true, msg, severity: 'error' })
+    } finally {
+      setDeleting(false)
     }
   }
 
@@ -263,6 +301,30 @@ export default function Compras() {
                     >
                       Ver
                     </Button>
+                    {isAdmin && (
+                      <Tooltip title="Editar compra">
+                        <IconButton
+                          size="small"
+                          onClick={() => openEditDialog(c)}
+                          aria-label={`Editar compra #${c.id}`}
+                          sx={{ color: '#2D5A1E', '&:hover': { bgcolor: 'rgba(45, 90, 30, 0.08)' } }}
+                        >
+                          <Edit fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    )}
+                    {isAdmin && (
+                      <Tooltip title="Eliminar compra">
+                        <IconButton
+                          size="small"
+                          onClick={() => confirmDelete(c)}
+                          aria-label={`Eliminar compra #${c.id}`}
+                          sx={{ color: '#C62828', '&:hover': { bgcolor: 'rgba(198, 40, 40, 0.08)' } }}
+                        >
+                          <Delete fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    )}
                   </Box>
                 </TableCell>
               </TableRow>
@@ -295,12 +357,54 @@ export default function Compras() {
         onSaved={() => { load(); setOpenCreate(false) }}
       />
 
+      <NuevaCompraDialog
+        open={openEdit}
+        onClose={() => { setOpenEdit(false); setEditCompra(null) }}
+        onSaved={() => { load(); setOpenEdit(false); setEditCompra(null) }}
+        compra={editCompra}
+      />
+
       <VerCompraDialog
         open={openView}
         onClose={() => setOpenView(false)}
         compra={viewCompra}
         onDescargar={descargar}
       />
+
+      <Dialog
+        open={deleteOpen}
+        onClose={() => { if (!deleting) { setDeleteOpen(false); setDeleteTarget(null) } }}
+        slotProps={{ paper: { sx: { borderRadius: 3 } } }}
+      >
+        <DialogTitle sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 600, color: '#C62828' }}>
+          Eliminar Compra #{deleteTarget?.id}
+        </DialogTitle>
+        <DialogContent>
+          <Typography sx={{ color: '#2C1810' }}>
+            Se eliminara esta compra y se ajustara el stock de los productos.
+          </Typography>
+          <Typography variant="body2" sx={{ color: '#6B5344', mt: 1 }}>
+            Esta accion no se puede deshacer.
+          </Typography>
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button
+            onClick={() => { setDeleteOpen(false); setDeleteTarget(null) }}
+            disabled={deleting}
+            sx={{ color: '#6B5344' }}
+          >
+            Cancelar
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handleDelete}
+            disabled={deleting}
+            sx={{ bgcolor: '#C62828', '&:hover': { bgcolor: '#8E0000' }, fontWeight: 600 }}
+          >
+            {deleting ? 'Eliminando...' : 'Eliminar'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Snackbar
         open={snack.open}

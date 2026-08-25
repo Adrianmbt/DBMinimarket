@@ -215,14 +215,16 @@ export default function Creditos() {
   const cRecBs = parseFloat(String(cobroRecBs).replace(',', '.')) || 0
   const cRecUsd = parseFloat(String(cobroRecUsd).replace(',', '.')) || 0
   const abonoSolicitado = parseFloat(String(abonoMonto).replace(',', '.')) || 0
-  const montoAbonar = abonoActivo && abonoSolicitado > 0 ? Math.min(abonoSolicitado, cobroSaldo) : cobroSaldo
   const cobroMoneda = cobroEsMixto
     ? 'USD'
     : (COBRO_PAYMENT_OPTIONS.find(o => o.value === cobroMetodo) || {}).currency || 'BS'
+  const cobroEsBs = !cobroEsMixto && cobroMoneda === 'BS'
+  const abonoSolicitadoUsd = cobroEsBs && cobroTasa ? abonoSolicitado / cobroTasa : abonoSolicitado
+  const montoAbonar = abonoActivo && abonoSolicitado > 0 ? Math.min(abonoSolicitadoUsd, cobroSaldo) : cobroSaldo
   const cobroRecibeTotal = cobroEsMixto && cobroTasa ? cRecUsd + cRecBs / cobroTasa : 0
   const cobroFaltaUsd = cobroEsMixto && cobroRecibeTotal > 0 ? Math.max(montoAbonar - cobroRecibeTotal, 0) : null
   const cobroInsuficiente = cobroEsMixto && cobroRecibeTotal > 0 && cobroFaltaUsd > 0.005
-  const abonoExcede = abonoActivo && abonoSolicitado > cobroSaldo + 0.005
+  const abonoExcede = abonoActivo && abonoSolicitado > 0 && abonoSolicitadoUsd > cobroSaldo + 0.005
 
   const handleRegistrarCobro = async () => {
     if (!cuentaSeleccionada) return
@@ -247,11 +249,11 @@ export default function Creditos() {
       const payload = {
         payment_method: cobroEsMixto ? `Mixto ($ + ${cobroMixtoBs})` : cobroMetodo,
         reference: cobroNecesitaRef ? (cobroRef.trim() || null) : null,
-        ...(abonoActivo && abonoSolicitado > 0 ? { monto_usd: abonoSolicitado } : {}),
+        ...(abonoActivo && abonoSolicitado > 0 ? { monto_usd: abonoSolicitadoUsd } : {}),
         ...(cobroEsMixto ? { received_usd: cRecUsd, received_bs: cRecBs } : {}),
       }
       await registrarCobro(cuentaSeleccionada.id, payload)
-      const completa = !abonoActivo || abonoSolicitado >= cobroSaldo - 0.005
+      const completa = !abonoActivo || abonoSolicitadoUsd >= cobroSaldo - 0.005
       setSnack({
         open: true,
         msg: completa
@@ -385,7 +387,7 @@ export default function Creditos() {
       return [...prev, {
         product_id: producto.id, name: producto.name, barcode: producto.barcode,
         sale_price: producto.sale_price, sale_unit: producto.sale_unit,
-        unitQty: esPeso ? 0 : 1, weightG: esPeso ? 500 : 0, max_stock: producto.stock,
+        unitQty: esPeso ? 0 : 1, weightG: esPeso ? 1000 : 0, max_stock: producto.stock,
       }]
     })
     setSearch('')
@@ -1069,17 +1071,40 @@ export default function Creditos() {
               {abonoActivo && (
                 <Box sx={{ mt: 1.5, display: 'grid', gridTemplateColumns: '1fr auto', gap: 1.5, alignItems: 'start' }}>
                   <TextField
-                    label="Monto del abono ($USD)" size="small" type="number"
+                    label={cobroEsBs ? 'Monto del abono (Bs)' : 'Monto del abono ($USD)'}
+                    size="small" type="number"
                     value={abonoMonto} onChange={e => setAbonoMonto(e.target.value)}
-                    error={abonoExcede || (abonoSolicitado > 0 && abonoSolicitado <= 0)}
-                    helperText={abonoExcede ? `No puede exceder el saldo (${money(cobroSaldo, 'USD')})` : ' '}
-                    slotProps={{ htmlInput: { min: 0.01, max: cobroSaldo, step: 0.01 } }}
+                    error={abonoExcede}
+                    helperText={abonoExcede
+                      ? cobroEsBs
+                        ? `No puede exceder el saldo (${money(cobroSaldo * (cobroTasa || 0), 'BS')})`
+                        : `No puede exceder el saldo (${money(cobroSaldo, 'USD')})`
+                      : cobroEsBs && abonoSolicitado > 0 && cobroTasa
+                        ? `≈ ${money(abonoSolicitadoUsd, 'USD')}`
+                        : ' '}
+                    slotProps={{ htmlInput: { min: 0.01, max: cobroEsBs ? cobroSaldo * (cobroTasa || 0) : cobroSaldo, step: 0.01 } }}
                   />
                   <Box sx={{ textAlign: 'right', pt: 1 }}>
                     <Typography variant="caption" sx={{ color: '#6B5344', display: 'block' }}>Nuevo saldo tras el abono</Typography>
-                    <Typography sx={{ fontWeight: 700, color: '#C9952A' }}>
-                      {money(Math.max(cobroSaldo - montoAbonar, 0), 'USD')}
-                    </Typography>
+                    {cobroEsBs ? (
+                      <>
+                        <Typography sx={{ fontWeight: 700, color: '#C9952A' }}>
+                          {money(Math.max((cobroSaldo - montoAbonar) * (cobroTasa || 0), 0), 'BS')}
+                        </Typography>
+                        <Typography variant="caption" sx={{ color: '#6B5344' }}>
+                          {money(Math.max(cobroSaldo - montoAbonar, 0), 'USD')}
+                        </Typography>
+                      </>
+                    ) : (
+                      <>
+                        <Typography sx={{ fontWeight: 700, color: '#C9952A' }}>
+                          {money(Math.max(cobroSaldo - montoAbonar, 0), 'USD')}
+                        </Typography>
+                        <Typography variant="caption" sx={{ color: '#6B5344' }}>
+                          ≈ Bs. {formatNumber(Math.max((cobroSaldo - montoAbonar) * (cobroTasa || 0), 0))}
+                        </Typography>
+                      </>
+                    )}
                   </Box>
                 </Box>
               )}
@@ -1092,7 +1117,7 @@ export default function Creditos() {
             disabled={pagando || !cobroTasa || abonoExcede || cobroInsuficiente}
             startIcon={<CheckCircle />}
             sx={{ bgcolor: '#2D5A1E', borderRadius: 2, fontWeight: 600, '&:hover': { bgcolor: '#3A7A28' } }}>
-            {pagando ? 'Procesando...' : (abonoActivo && abonoSolicitado > 0 && abonoSolicitado < cobroSaldo - 0.005)
+            {pagando ? 'Procesando...' : (abonoActivo && abonoSolicitado > 0 && abonoSolicitadoUsd < cobroSaldo - 0.005)
               ? `Registrar Abono ${money(montoAbonar, 'USD')}`
               : 'Registrar Cobro Completo'}
           </Button>

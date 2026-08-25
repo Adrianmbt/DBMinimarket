@@ -309,7 +309,7 @@ export default function Ventas() {
             : l
         )
       }
-      const inicial = esPeso ? Math.min(500, producto.stock ?? 500) : 1
+      const inicial = esPeso ? Math.min(1000, producto.stock ?? 1000) : 1
       return [...prev, {
         product_id: producto.id,
         name: producto.name,
@@ -456,7 +456,7 @@ export default function Ventas() {
         sale_price: producto.sale_price,
         sale_unit: producto.sale_unit,
         unitQty: esPeso ? 0 : 1,
-        weightG: esPeso ? 500 : 0,
+        weightG: esPeso ? 1000 : 0,
         max_stock: producto.stock,
       }]
     })

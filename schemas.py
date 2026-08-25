@@ -271,6 +271,11 @@ class PurchaseCreate(BaseModel):
     supplier: Optional[str] = None
     items: List[PurchaseDetailCreate] = Field(..., min_length=1)
 
+class PurchaseUpdate(BaseModel):
+    """Actualización de compra (solo administrador)."""
+    supplier: Optional[str] = None
+    items: Optional[List[PurchaseDetailCreate]] = Field(None, min_length=1)
+
 class PurchaseResponse(BaseModel):
     id: int
     created_at: datetime

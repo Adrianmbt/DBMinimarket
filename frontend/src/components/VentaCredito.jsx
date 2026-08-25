@@ -97,7 +97,7 @@ export default function VentaCredito({ open, onClose, onVentaCreada }) {
         sale_price: producto.sale_price,
         sale_unit: producto.sale_unit,
         unitQty: esPeso ? 0 : 1,
-        weightG: esPeso ? 500 : 0,
+        weightG: esPeso ? 1000 : 0,
         max_stock: producto.stock,
       }]
     })

@@ -76,6 +76,15 @@ echo =^> 5. Cargando datos iniciales...
 python seed_data.py
 if errorlevel 1 goto err_seed
 
+echo.
+echo =^> 5b. Importando datos del sistema anterior...
+if exist smilla.db (
+    python migrar_smilla.py
+    if errorlevel 1 goto err_seed
+) else (
+    echo [SKIP] No se encontro smilla.db, se usa la semilla por defecto.
+)
+
 call deactivate
 
 echo.

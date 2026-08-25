@@ -7,7 +7,7 @@ import {
 import { Add, Close, Store, Person, Scale, InfoOutlined, Inventory2, Payments } from '@mui/icons-material'
 import { getProductos as fetchProductos } from '../api/productos'
 import { getCategorias as fetchCategorias } from '../api/categorias'
-import { createCompra } from '../api/compras'
+import { createCompra, updateCompra } from '../api/compras'
 import { limpiarNumero } from '../utils/num'
 
 const formatNumber = (n) => {
@@ -62,7 +62,8 @@ const blankItem = () => ({
   pack_price: '',
 })
 
-export default function NuevaCompraDialog({ open, onClose, onSaved }) {
+export default function NuevaCompraDialog({ open, onClose, onSaved, compra }) {
+  const esEdicion = !!compra
   const [productos, setProductos] = useState([])
   const [categorias, setCategorias] = useState([])
   const [supplier, setSupplier] = useState('')
@@ -84,16 +85,41 @@ export default function NuevaCompraDialog({ open, onClose, onSaved }) {
           setCategorias(c.data)
         }
       } catch {
-        if (!ignore) setSnack({ open: true, msg: 'No se pudo cargar el inventario. Revisa la conexión con el servidor.', severity: 'error' })
+        if (!ignore) setSnack({ open: true, msg: 'No se pudo cargar el inventario. Revisa la conexion con el servidor.', severity: 'error' })
       }
       if (!ignore) {
-        setSupplier('')
-        setItems([blankItem()])
+        if (compra) {
+          setSupplier(compra.supplier || '')
+          setItems((compra.details || []).map(d => {
+            const prod = d.product || {}
+            const isPeso = d.weight_kg != null
+            const isCaja = d.boxes != null
+            return {
+              id: crypto.randomUUID(),
+              existing: true,
+              product_id: d.product_id,
+              name: prod.name || '',
+              barcode: prod.barcode || '',
+              category_id: prod.category_id || '',
+              unit: prod.sale_unit || '',
+              cost_price: isPeso ? d.cost_price : (isCaja && d.units_per_box ? (d.cost_price * d.units_per_box) : d.cost_price),
+              sale_price: prod.sale_price || '',
+              min_stock: prod.min_stock || 5,
+              weight_kg: isPeso ? d.weight_kg : '',
+              boxes: isCaja ? d.boxes : '',
+              units_per_box: isCaja ? d.units_per_box : '',
+              pack_price: isCaja ? d.cost_price : '',
+            }
+          }))
+        } else {
+          setSupplier('')
+          setItems([blankItem()])
+        }
       }
     }
     load()
     return () => { ignore = true }
-  }, [open])
+  }, [open, compra])
 
   const handleAddItem = () => setItems([...items, blankItem()])
   const handleRemoveItem = (i) => setItems(items.filter((_, idx) => idx !== i))
@@ -212,12 +238,17 @@ export default function NuevaCompraDialog({ open, onClose, onSaved }) {
     }
 
     try {
-      await createCompra(payload)
-      setSnack({ open: true, msg: 'Compra registrada exitosamente', severity: 'success' })
+      if (esEdicion) {
+        await updateCompra(compra.id, payload)
+        setSnack({ open: true, msg: 'Compra actualizada exitosamente', severity: 'success' })
+      } else {
+        await createCompra(payload)
+        setSnack({ open: true, msg: 'Compra registrada exitosamente', severity: 'success' })
+      }
       onSaved()
       onClose()
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Error al crear compra'
+      const msg = err.response?.data?.detail || (esEdicion ? 'Error al actualizar compra' : 'Error al crear compra')
       setSnack({ open: true, msg, severity: 'error' })
     }
   }
@@ -238,7 +269,7 @@ export default function NuevaCompraDialog({ open, onClose, onSaved }) {
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
             <Add sx={{ fontSize: 22 }} />
             <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 600, fontSize: '1.15rem' }}>
-              Nueva Compra
+              {esEdicion ? `Editar Compra #${compra.id}` : 'Nueva Compra'}
             </Typography>
           </Box>
           <IconButton
@@ -651,7 +682,7 @@ export default function NuevaCompraDialog({ open, onClose, onSaved }) {
               boxShadow: '0 4px 12px rgba(45,90,30,0.25)', transition: 'all 0.2s ease',
             }}
           >
-            Registrar Compra
+            {esEdicion ? 'Guardar Cambios' : 'Registrar Compra'}
           </Button>
         </DialogActions>
       </Dialog>

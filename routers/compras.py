@@ -4,8 +4,8 @@ from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import func
 from database import get_db
 from models import Category, Product, Purchase, PurchaseDetail, User
-from schemas import PurchaseCreate, PurchaseDetailCreate, PurchaseResponse
-from security import get_current_user
+from schemas import PurchaseCreate, PurchaseDetailCreate, PurchaseResponse, PurchaseUpdate
+from security import get_current_user, requiere_admin
 from services.pdf import generar_pdf_compra
 
 router = APIRouter(prefix="/api/compras", tags=["Compras"])
@@ -143,6 +143,122 @@ def crear_compra(
     db.commit()
     db.refresh(compra)
     return compra
+
+
+@router.put("/{id}", response_model=PurchaseResponse)
+def actualizar_compra(
+    id: int,
+    compra_data: PurchaseUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Actualiza una compra existente (solo administrador)."""
+    requiere_admin(user)
+
+    compra = db.query(Purchase).options(
+        selectinload(Purchase.details).selectinload(PurchaseDetail.product)
+    ).filter(Purchase.id == id).first()
+    if not compra:
+        raise HTTPException(404, "Compra no encontrada")
+
+    if compra_data.supplier is not None:
+        compra.supplier = compra_data.supplier
+
+    if compra_data.items is not None:
+        for d in list(compra.details):
+            prod = db.get(Product, d.product_id)
+            if prod:
+                if d.weight_kg is not None:
+                    gramos = round(d.weight_kg * 1000.0)
+                    prod.stock = max(0, (prod.stock or 0) - gramos)
+                elif d.boxes and d.units_per_box:
+                    unidades = d.boxes * d.units_per_box
+                    prod.stock = max(0, (prod.stock or 0) - unidades)
+                else:
+                    prod.stock = max(0, (prod.stock or 0) - d.quantity)
+        db.flush()
+
+        detalles = []
+        total = 0.0
+        for item in compra_data.items:
+            producto = _find_or_create_producto(item, db)
+            modalidad = _aplicar_categoria(producto, item, db)
+
+            stock_previo = producto.stock or 0
+
+            if modalidad == "peso":
+                kg = item.weight_kg
+                if not kg:
+                    raise HTTPException(422, f"Indicar el peso en kg para '{producto.name}' (categoria peso)")
+                gramos = round(kg * 1000.0)
+                producto.stock = stock_previo + gramos
+                subtotal = item.cost_price * kg
+                detalle = PurchaseDetail(
+                    product_id=producto.id, quantity=gramos,
+                    cost_price=item.cost_price, weight_kg=kg,
+                )
+            else:
+                if not item.boxes or not item.units_per_box:
+                    raise HTTPException(422, f"Indica cajas y unidades por caja para '{producto.name}' (categoria unidad)")
+                unidades = item.boxes * item.units_per_box
+                producto.stock = stock_previo + unidades
+                subtotal = item.cost_price * unidades
+                detalle = PurchaseDetail(
+                    product_id=producto.id, quantity=unidades,
+                    cost_price=item.cost_price, boxes=item.boxes,
+                    units_per_box=item.units_per_box,
+                )
+
+            producto.cost_price = item.cost_price
+            if item.sale_price is not None:
+                producto.sale_price = item.sale_price
+            if item.min_stock is not None:
+                producto.min_stock = item.min_stock
+            if item.description is not None:
+                producto.description = item.description
+            producto.activo = True
+
+            total += subtotal
+            detalles.append(detalle)
+
+        compra.details = detalles
+        compra.total = total
+
+    db.commit()
+    db.refresh(compra)
+    return compra
+
+
+@router.delete("/{id}")
+def eliminar_compra(
+    id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Elimina una compra (solo administrador). Devuelve el stock al inventario."""
+    requiere_admin(user)
+
+    compra = db.query(Purchase).options(
+        selectinload(Purchase.details)
+    ).filter(Purchase.id == id).first()
+    if not compra:
+        raise HTTPException(404, "Compra no encontrada")
+
+    for d in compra.details:
+        prod = db.get(Product, d.product_id)
+        if prod:
+            if d.weight_kg is not None:
+                gramos = round(d.weight_kg * 1000.0)
+                prod.stock = max(0, (prod.stock or 0) - gramos)
+            elif d.boxes and d.units_per_box:
+                unidades = d.boxes * d.units_per_box
+                prod.stock = max(0, (prod.stock or 0) - unidades)
+            else:
+                prod.stock = max(0, (prod.stock or 0) - d.quantity)
+
+    db.delete(compra)
+    db.commit()
+    return {"ok": True, "message": f"Compra #{id} eliminada. El stock fue ajustado."}
 
 
 @router.get("/{compra_id}/pdf")
