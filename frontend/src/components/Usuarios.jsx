@@ -94,7 +94,7 @@ export default function Usuarios() {
       setOpen(false)
       load()
     } catch (err) {
-      setSnack({ open: true, msg: err.response?.data?.detail || 'Error al guardar el usuario', severity: 'error' })
+      setSnack({ open: true, msg: mensajeError(err, 'Error al guardar el usuario'), severity: 'error' })
     } finally {
       setSaving(false)
     }
@@ -108,7 +108,7 @@ export default function Usuarios() {
       setEliminar(null)
       load()
     } catch (err) {
-      setSnack({ open: true, msg: err.response?.data?.detail || 'Error al eliminar el usuario', severity: 'error' })
+      setSnack({ open: true, msg: mensajeError(err, 'Error al eliminar el usuario'), severity: 'error' })
       setEliminar(null)
     }
   }

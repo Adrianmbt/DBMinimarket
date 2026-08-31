@@ -14,10 +14,12 @@ import AccountBalanceIcon from '@mui/icons-material/AccountBalance'
 import StorefrontIcon from '@mui/icons-material/Storefront'
 import GroupIcon from '@mui/icons-material/Group'
 import AccountBalanceWalletIcon from '@mui/icons-material/AccountBalanceWallet'
+import PriceCheckIcon from '@mui/icons-material/PriceCheck'
 import { getTasa } from '../api/tasa'
 import { clearSession } from '../api/axios'
 import { useEffect } from 'react'
 import { readSession } from '../utils/session'
+import ConsultaPrecios from './ConsultaPrecios'
 
 const drawerWidth = 250
 
@@ -34,6 +36,7 @@ export default function Layout({ children }) {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [tasa, setTasa] = useState(null)
   const [tasaOpen, setTasaOpen] = useState(false)
+  const [consultaOpen, setConsultaOpen] = useState(false)
   const navigate = useNavigate()
   const location = useLocation()
   const rawUser = readSession('user')
@@ -223,6 +226,18 @@ export default function Layout({ children }) {
           >
             {menuItems.find(m => m.path === location.pathname)?.text || 'Don Beni Minimarket'}
           </Typography>
+          <Tooltip title="Consulta de precios" arrow>
+            <IconButton
+              onClick={() => setConsultaOpen(true)}
+              sx={{
+                mr: 1,
+                color: '#2C1810',
+                '&:hover': { bgcolor: 'rgba(201, 149, 42, 0.12)' },
+              }}
+            >
+              <PriceCheckIcon />
+            </IconButton>
+          </Tooltip>
           {tasa && (
             <Tooltip title="Tasa BCV actual" arrow>
               <Box
@@ -308,6 +323,8 @@ export default function Layout({ children }) {
       >
         {children}
       </Box>
+
+      <ConsultaPrecios open={consultaOpen} onClose={() => setConsultaOpen(false)} />
     </Box>
   )
 }

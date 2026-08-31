@@ -2,48 +2,52 @@
 
 ## Resumen
 
-El archivo `smilla.db` contiene los datos reales del sistema anterior (semilla cargada el sábado pasado). Este archivo se importa automáticamente al ejecutar `instalar.bat`, transfiriendo la información a `minimarket.db` (la base de datos del sistema nuevo).
+El archivo `minimarketmg.db` contiene los datos reales del sistema (backup del domingo). Este archivo se importa al ejecutar `python migrar_seed.py`, transfiriendo la información a `minimarket.db` (la base de datos del sistema).
 
-**Datos contenidos en smilla.db:**
-- 325 productos reales
-- 117 ventas históricas
-- 30 compras a proveedores
-- 10 cuentas de crédito (4 pendientes)
-- 3 cierres diarios
-- 12 registros de bajas de stock
-- Usuarios del sistema anterior
+**Datos contenidos en minimarketmg.db:**
+- 334 productos reales
+- 236 ventas históricas
+- 36 compras a proveedores
+- 13 cuentas de crédito (6 pendientes, 7 pagadas)
+- 4 cierres diarios
+- 16 registros de bajas de stock
+- 3 usuarios del sistema
 
 ---
 
-## Flujo de Instalación
+## Flujo de Migración
 
-Cuando ejecutas `instalar.bat`, el proceso realiza estos pasos en orden:
+Cuando ejecutas `python migrar_seed.py`, el proceso realiza estos pasos:
 
 ```
-Paso 5:  python seed_data.py          ← Crea datos de DEMO (40 productos ficticios)
-Paso 5b: python migrar_smilla.py      ← Importa datos REALES de smilla.db (si existe)
+1. Elimina datos demo actuales de minimarket.db
+2. Importa categorías, usuarios, productos
+3. Importa compras con sus detalles
+4. Importa bajas de stock
+5. Importa ventas con sus detalles
+6. Importa cuentas de crédito y extrae pagos a tabla pagos_credito
+7. Importa cierres diarios
+8. Importa tasas de cambio
+9. Verifica integridad de la migración
 ```
-
-**Nota:** Si `smilla.db` no existe, la app queda con datos de demostración (solo para pruebas).
 
 ---
 
 ## Instrucciones Paso a Paso
 
-### 1. Verificar que smilla.db existe
+### 1. Verificar que minimarketmg.db existe
 
-Asegúrate de que el archivo `smilla.db` esté en la raíz del proyecto:
+Asegúrate de que el archivo `minimarketmg.db` esté en la raíz del proyecto:
 
 ```
-C:\Users\...\DBMinimarket\smilla.db
+C:\Users\...\DBMinimarket\minimarketmg.db
 ```
 
-### 2. Ejecutar la instalación
+### 2. Ejecutar la migración
 
-Doble clic en `instalar.bat`. El script ejecutará automáticamente:
-- Instalación de dependencias (Python y Node.js)
-- Creación de datos de demostración (seed)
-- Importación de datos reales desde `smilla.db`
+```bash
+python migrar_seed.py
+```
 
 ### 3. Verificar resultados
 
@@ -51,15 +55,24 @@ Al finalizar, la consola mostrará un resumen como:
 
 ```
 ==================================================
-  MIGRACIÓN COMPLETADA
+  VERIFICACION DE MIGRACION
 ==================================================
-  users              :   X usuarios nuevos importados
-  products           : XXX productos nuevos importados
-  purchases          :  30 compras nuevas importadas
-  stock_bajas        :  12 bajas de stock importadas
-  sales              : 117 ventas nuevas importadas
-  cuentas_credito    :  10 cuentas de credito importadas
-  cierres_diarios    :   3 cierres diarios importados
+  categories               :     9 registros
+  users                    :     3 registros
+  products                 :   334 registros
+  purchases                :    36 registros
+  purchase_details         :    36 registros
+  sales                    :   236 registros
+  sale_details             :   407 registros
+  stock_bajas              :    16 registros
+  cuentas_credito          :    13 registros
+  pagos_credito            :     3 registros
+  cierres_diarios          :     4 registros
+  exchange_rates           :     1 registros
+
+  Creditos pendientes: 6
+  Creditos pagados: 7
+  Pagos registrados: 3
 ```
 
 ---
@@ -68,35 +81,39 @@ Al finalizar, la consola mostrará un resumen como:
 
 | Tabla | Acción | Detalle |
 |-------|--------|---------|
-| `categories` | Se saltan | Ya idénticas en ambas bases de datos |
-| `users` | Se importan | Solo los que no existen (sin duplicar) |
-| `products` | Se importan | 325 productos reales, mapeando categorías |
-| `purchases` | Se importan | 30 compras con sus detalles |
-| `purchase_details` | Se importan | Detalle de cada compra (cantidad, costo, cajas, peso) |
-| `stock_bajas` | Se importan | 12 registros de bajas de mercancía |
-| `sales` | Se importan | 117 ventas con impuestos y métodos de pago |
-| `sale_details` | Se importan | Detalle de productos vendidos |
-| `cuentas_credito` | Se importan | 10 cuentas (4 pendientes, 6 pagadas) |
-| `pagos_credito` | Se importan | Pagos registrados para cuentas pagadas |
-| `cierres_diarios` | Se importan | 3 cierres de caja diarios |
-| `exchange_rates` | **NO se migra** | Se actualiza desde la app (tasa BCV) |
+| `categories` | Se reemplazan | 9 categorías idénticas |
+| `users` | Se reemplazan | 3 usuarios (admin, cajero1, cajero2) |
+| `products` | Se reemplazan | 334 productos reales con categorías |
+| `purchases` | Se reemplazan | 36 compras con sus detalles |
+| `purchase_details` | Se reemplazan | Detalle de cada compra (cantidad, costo, cajas, peso) |
+| `stock_bajas` | Se reemplazan | 16 registros de bajas de mercancía |
+| `sales` | Se reemplazan | 236 ventas con impuestos y métodos de pago |
+| `sale_details` | Se reemplazan | 407 detalles de productos vendidos |
+| `cuentas_credito` | Se reemplazan | 13 cuentas (6 pendientes, 7 pagadas) |
+| `pagos_credito` | Se crean | 3 pagos extraídos de cuentas pagadas |
+| `cierres_diarios` | Se reemplazan | 4 cierres de caja diarios |
+| `exchange_rates` | Se reemplazan | 1 tasa de cambio |
+
+**Nota:** La tabla `pagos_credito` es nueva en el esquema actual. Las cuentas de crédito pagadas en `minimarketmg.db` tenían los datos de pago embebidos (`payment_method`, `payment_reference`, etc.). El script `migrar_seed.py` extrae estos datos y los inserta en `pagos_credito`.
 
 ---
 
 ## Semilla de Demostración
 
-El archivo `seed_data.py` crea datos ficticios para pruebas:
+El archivo `seed_data.py` crea datos ficticios para pruebas iniciales:
 - 40 productos de ejemplo (Harina PAN, Coca-Cola, etc.)
 - 3 usuarios de prueba (admin, cajero1, cajero2)
 - 10 compras de ejemplo
 - 7 ventas de ejemplo
 
-**Estos datos se crean ANTES de la migración.** Si ejecutas la migración, los datos reales de `smilla.db` se importan encima (sin duplicar).
-
-### Para probar sin datos reales:
+**Para cargar datos reales:**
 ```bash
-# No tener smilla.db en la raíz, o renombrarlo:
-ren smilla.db smilla_backup.db
+# Asegurar que minimarketmg.db existe en la raíz
+python migrar_seed.py
+```
+
+**Para volver a datos de demo:**
+```bash
 python seed_data.py
 ```
 
@@ -116,42 +133,45 @@ Esto es idempotente: se puede ejecutar muchas veces sin problemas.
 
 ## Notas Importantes
 
-1. **Script idempotente:** `migrar_smilla.py` se puede ejecutar varias veces sin crear duplicados.
+1. **Script de migración:** `migrar_seed.py` reemplaza completamente los datos demo con los datos reales de `minimarketmg.db`.
 
 2. **Backup recomendado:** Antes de migrar, haz una copia de seguridad:
    ```bash
-   copy smilla.db smilla_backup_2026.db
+   copy minimarket.db minimarket_backup_2026.db
    ```
 
-3. **Tasas de cambio:** La tasa BCV no se migra (se actualiza automáticamente desde la API oficial).
+3. **Tasas de cambio:** La tasa BCV se migra desde el backup, pero puede actualizarse desde la app.
 
 4. **Contraseñas:** Los usuarios se importan con sus contraseñas hasheadas (bcrypt). Las contraseñas de la semilla de demostración son: admin/admin123, cajero1/cajero123, cajero2/cajero123.
 
-5. **Categorías:** Las categorías de `smilla.db` ya son idénticas a las del sistema nuevo, por eso se saltan en la migración.
+5. **Cuentas de crédito:** Las cuentas pagadas se migran con sus datos de pago extraídos a la tabla `pagos_credito`.
+
+6. **Integridad referencial:** El script verifica que no haya detalles huérfanos (productos inexistentes en detalles de ventas/compras).
 
 ---
 
 ## Troubleshooting
 
-### Error: "No se encuentra smilla.db"
+### Error: "No se encuentra minimarketmg.db"
 - Verifica que el archivo esté en la raíz del proyecto
-- El sistemaContinuará con datos de demostración
+- El sistema no podrá cargar datos reales sin este archivo
 
 ### Error: "No se encuentra minimarket.db"
 - Ejecuta la app primero para crear la base de datos
 - O ejecuta: `python -c "from database import Base, engine; Base.metadata.create_all(bind=engine)"`
 
-### Error: "Fallo la carga de la semilla de datos"
-- Verifica que Python esté instalado y en el PATH
-- Verifica que las dependencias estén instaladas: `pip install -r requeriments.txt`
-
 ### Los productos no aparecen
 - Verifica que la migración se ejecutó correctamente
 - Revisa la consola para ver el resumen de la migración
+- Verifica que `minimarketmg.db` tenga datos
 
 ### Los usuarios no funcionan
 - Las contraseñas están hasheadas con bcrypt
 - Si olvidaste las contraseñas, usa: admin/admin123
+
+### Error de integridad referencial
+- El script verifica que no haya detalles huérfanos
+- Si hay errores, verifica que los productos existan en ambas bases de datos
 
 ---
 
@@ -159,9 +179,10 @@ Esto es idempotente: se puede ejecutar muchas veces sin problemas.
 
 | Archivo | Descripción |
 |---------|-------------|
-| `smilla.db` | Base de datos del sistema anterior (datos reales) |
-| `minimarket.db` | Base de datos del sistema nuevo |
-| `migrar_smilla.py` | Script de migración |
+| `minimarketmg.db` | Backup de la base de datos (datos reales del domingo) |
+| `minimarket.db` | Base de datos actual del sistema |
+| `migrar_seed.py` | Script de migración desde minimarketmg.db |
+| `migrar_smilla.py` | Script de migración desde smilla.db (sistema anterior) |
 | `seed_data.py` | Semilla de datos de demostración |
 | `database.py` | Conexión a BD y migración de esquema |
 | `models.py` | Modelos de SQLAlchemy |

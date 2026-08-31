@@ -8,14 +8,17 @@ import {
 import {
   Add, Visibility, PointOfSale, Search, Close, AddCircle,
   RemoveCircle, Delete, ShoppingCart, Receipt, QrCodeScanner,
-  Lock, CalendarToday, AssignmentTurnedIn, Download, Edit,
+  Lock, CalendarToday, AssignmentTurnedIn, Download, Edit, LockOpen,
+  PriceCheck,
 } from '@mui/icons-material'
-import { getVentas, createVenta, updateVenta, deleteVenta, descargarReporteZ, descargarFactura, getEstadoCierre, getResumenDia, cerrarCaja } from '../api/ventas'
+import { getVentas, createVenta, updateVenta, deleteVenta, descargarReporteZ, descargarFactura, getEstadoCierre, getResumenDia, cerrarCaja, abrirCaja } from '../api/ventas'
 import { getProductos } from '../api/productos'
 import { getTasa } from '../api/tasa'
 import Paginador from './Paginador'
 import { usePaginacion } from '../hooks/usePaginacion'
 import { limpiarNumero } from '../utils/num'
+import { mensajeError } from '../utils/error'
+import ConsultaPrecios from './ConsultaPrecios'
 
 export const formatNumber = (n, digits = 2) => {
   if (n === undefined || n === null || Number.isNaN(n)) return '—'
@@ -70,6 +73,7 @@ const rowSx = {
 export default function Ventas() {
   const [ventas, setVentas] = useState([])
   const [openCreate, setOpenCreate] = useState(false)
+  const [consultaPreciosOpen, setConsultaPreciosOpen] = useState(false)
   const [openView, setOpenView] = useState(false)
   const [viewVenta, setViewVenta] = useState(null)
   const [openEdit, setOpenEdit] = useState(false)
@@ -119,6 +123,8 @@ export default function Ventas() {
   const [cierreLoading, setCierreLoading] = useState(false)
   const [cierreEstado, setCierreEstado] = useState(null)
   const [cierreConfirmOpen, setCierreConfirmOpen] = useState(false)
+  const [abrirConfirmOpen, setAbrirConfirmOpen] = useState(false)
+  const [abrirLoading, setAbrirLoading] = useState(false)
   const [fechaFiltro, setFechaFiltro] = useState('')
   const [resumen, setResumen] = useState(null)
   const [resumenLoading, setResumenLoading] = useState(false)
@@ -169,10 +175,25 @@ export default function Ventas() {
       await Promise.all([aplicarFechaFiltro(hoyISO), loadEstado()])
       setSnack({ open: true, msg: 'Cierre Z realizado. La caja de hoy quedó cerrada.', severity: 'success' })
     } catch (err) {
-      const msg = err.response?.data?.detail || 'No se pudo realizar el cierre Z'
+      const msg = mensajeError(err, 'No se pudo realizar el cierre Z')
       setSnack({ open: true, msg, severity: 'error' })
     } finally {
       setCierreLoading(false)
+    }
+  }
+
+  const handleAbrirCaja = async () => {
+    setAbrirConfirmOpen(false)
+    setAbrirLoading(true)
+    try {
+      const res = await abrirCaja()
+      await Promise.all([aplicarFechaFiltro(hoyISO), loadEstado()])
+      setSnack({ open: true, msg: `Caja de ${res.data?.fecha || hoyISO} abierta. Ya puedes vender.`, severity: 'success' })
+    } catch (err) {
+      const msg = mensajeError(err, 'No se pudo abrir la caja')
+      setSnack({ open: true, msg, severity: 'error' })
+    } finally {
+      setAbrirLoading(false)
     }
   }
 
@@ -374,7 +395,7 @@ export default function Ventas() {
       setEditVenta(null)
       aplicarFechaFiltro(fechaFiltro || hoyISO)
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Error al actualizar la venta'
+      const msg = mensajeError(err, 'Error al actualizar la venta')
       setSnack({ open: true, msg, severity: 'error' })
     } finally {
       setEditSaving(false)
@@ -400,7 +421,7 @@ export default function Ventas() {
       setDeleteTarget(null)
       aplicarFechaFiltro(fechaFiltro || hoyISO)
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Error al eliminar la venta'
+      const msg = mensajeError(err, 'Error al eliminar la venta')
       setSnack({ open: true, msg, severity: 'error' })
     } finally {
       setDeleting(false)
@@ -630,7 +651,7 @@ export default function Ventas() {
       setCart([])
       aplicarFechaFiltro(hoyISO)
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Error al registrar venta'
+      const msg = mensajeError(err, 'Error al registrar venta')
       setSnack({ open: true, msg, severity: 'error' })
     } finally {
       setSubmitting(false)
@@ -721,6 +742,22 @@ export default function Ventas() {
           >
             {cierreLoading ? 'Cerrando…' : cajaCerrada ? 'Caja cerrada ✓' : 'Cierre Z'}
           </Button>
+          {cajaCerrada && isAdmin && (
+            <Button
+              variant="text"
+              onClick={() => setAbrirConfirmOpen(true)}
+              disabled={abrirLoading}
+              startIcon={<LockOpen />}
+              sx={{
+                color: '#2D5A1E', borderRadius: 2.5, px: 2, py: 1.2,
+                fontSize: '0.85rem', fontWeight: 600,
+                '&:hover': { bgcolor: 'rgba(45, 90, 30, 0.08)' },
+                animation: 'fade-in-up 0.5s ease-out 0.25s both',
+              }}
+            >
+              {abrirLoading ? 'Abriendo…' : 'Abrir caja'}
+            </Button>
+          )}
         </Box>
       </Box>
 
@@ -1486,6 +1523,18 @@ export default function Ventas() {
 
             <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1.5, mt: 2 }}>
               <Button
+                onClick={() => setConsultaPreciosOpen(true)}
+                startIcon={<PriceCheck />}
+                sx={{
+                  color: '#6B5344', fontWeight: 500, borderRadius: 2, px: 2.5,
+                  border: '1px solid rgba(201, 149, 42, 0.3)',
+                  bgcolor: 'rgba(201, 149, 42, 0.06)',
+                  '&:hover': { bgcolor: 'rgba(201, 149, 42, 0.12)' },
+                }}
+              >
+                Consultar precio
+              </Button>
+              <Button
                 onClick={() => setOpenCreate(false)}
                 sx={{ color: '#6B5344', fontWeight: 500, borderRadius: 2, px: 3, '&:hover': { bgcolor: 'rgba(107,83,68,0.08)' } }}
               >
@@ -2137,6 +2186,49 @@ export default function Ventas() {
         </DialogActions>
       </Dialog>
 
+      {/* CONFIRMAR ABRIR CAJA */}
+      <Dialog
+        open={abrirConfirmOpen}
+        onClose={() => setAbrirConfirmOpen(false)}
+        maxWidth="xs"
+        fullWidth
+        slotProps={{ paper: { sx: { borderRadius: 3, overflow: 'hidden' } } }}
+      >
+        <DialogTitle sx={{
+          bgcolor: '#2D5A1E', color: '#FFF8F0', py: 2, px: 3,
+          display: 'flex', alignItems: 'center', gap: 1.5,
+        }}>
+          <LockOpen sx={{ color: '#C7E6B8' }} />
+          <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 600, fontSize: '1.1rem' }}>
+            Abrir caja del día
+          </Typography>
+        </DialogTitle>
+        <DialogContent sx={{ pt: 3, px: 3 }}>
+          <Typography sx={{ color: '#2C1810', fontSize: '0.9rem', mb: 1.5 }}>
+            Se abrirá la caja de hoy ({hoyISO}) y se podrán registrar ventas de nuevo.
+          </Typography>
+          <Alert severity="warning" sx={{ borderRadius: 2, fontSize: '0.8rem' }}>
+            Las ventas que ya tenga hoy <b>se contarán dentro de hoy</b> y volverán a sumarse cuando hagas el cierre Z al final del día. Solo admin puede hacer esto.
+          </Alert>
+        </DialogContent>
+        <DialogActions sx={{ p: 2, px: 3, borderTop: '1px solid rgba(45, 90, 30, 0.12)', bgcolor: '#F8F5F0' }}>
+          <Button onClick={() => setAbrirConfirmOpen(false)} sx={{ color: '#6B5344', fontWeight: 500, borderRadius: 2, px: 3 }}>
+            Cancelar
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handleAbrirCaja}
+            disabled={abrirLoading}
+            sx={{
+              bgcolor: '#2D5A1E', borderRadius: 2, px: 3.5, fontWeight: 600,
+              '&:hover': { bgcolor: '#1E3D14' },
+            }}
+          >
+            {abrirLoading ? 'Abriendo…' : 'Confirmar apertura'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       {/* Snackbar */}
       <Snackbar
         open={snack.open}
@@ -2148,6 +2240,8 @@ export default function Ventas() {
           {snack.msg}
         </Alert>
       </Snackbar>
+
+      <ConsultaPrecios open={consultaPreciosOpen} onClose={() => setConsultaPreciosOpen(false)} />
     </Box>
   )
 }

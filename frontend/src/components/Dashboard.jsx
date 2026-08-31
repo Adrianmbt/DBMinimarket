@@ -269,7 +269,7 @@ export default function Dashboard() {
       const d = await getDashboard()
       setData(d.data)
     } catch (e) {
-      setCleanErr(e?.response?.data?.detail || 'No se pudo limpiar la base de datos.')
+      setCleanErr(mensajeError(e, 'No se pudo limpiar la base de datos.'))
     } finally {
       setCleanBusy(false)
     }

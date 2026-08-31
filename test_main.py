@@ -488,6 +488,38 @@ def test_cierre_z_bloquea_ventas():
     assert client.get(f"/api/productos/{prod['id']}", headers=h).json()["stock"] == 47
 
 
+def test_abrir_caja_reabre_con_ventas_y_sin_ventas():
+    """Reabrir caja elimina el cierre del día (con o sin ventas) y vuelve a contar todo."""
+    token = _login()
+    h = _auth(token)
+    prod, venta = _crear_venta(h, barcode="C9", name="Atún", precio=3.00, cantidad=1)
+
+    hoy = (datetime.fromisoformat(venta["created_at"])
+           .replace(tzinfo=timezone.utc).astimezone().date().isoformat())
+
+    # Con ventas: el cierre se registra y al abrir vuelve a contarse en el día
+    assert client.post("/api/ventas/cierre", headers=h).status_code == 200
+    est = client.get("/api/ventas/cierre/estado", headers=h).json()
+    assert est["cerrado"] is True
+
+    resp = client.delete("/api/ventas/cierre", headers=h)
+    assert resp.status_code == 200
+    assert resp.json()["abierta"] is True
+
+    # La caja quedó abierta y la venta se sigue contando dentro de hoy
+    est = client.get("/api/ventas/cierre/estado", headers=h).json()
+    assert est["cerrado"] is False
+    assert est["total_ventas_hoy"] == 1
+    assert est["total_usd_hoy"] == 3.00
+
+    # No-admin no puede abrir una caja (403)
+    h3 = _auth(_login("vendedor1", "admin123", role="vendedor"))
+    assert client.delete("/api/ventas/cierre", headers=h3).status_code == 403
+
+    # Abrir un día que no está cerrado devuelve 404
+    assert client.delete(f"/api/ventas/cierre?fecha=2020-01-01", headers=h).status_code == 404
+
+
 def test_consultar_ventas_y_resumen_por_fecha():
     """Consulta de ventas y resumen estilo reporte Z para una fecha específica."""
     token = _login()

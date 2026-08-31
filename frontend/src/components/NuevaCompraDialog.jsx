@@ -9,6 +9,7 @@ import { getProductos as fetchProductos } from '../api/productos'
 import { getCategorias as fetchCategorias } from '../api/categorias'
 import { createCompra, updateCompra } from '../api/compras'
 import { limpiarNumero } from '../utils/num'
+import { mensajeError } from '../utils/error'
 
 const formatNumber = (n) => {
   if (n === undefined || n === null) return '?'
@@ -248,7 +249,7 @@ export default function NuevaCompraDialog({ open, onClose, onSaved, compra }) {
       onSaved()
       onClose()
     } catch (err) {
-      const msg = err.response?.data?.detail || (esEdicion ? 'Error al actualizar compra' : 'Error al crear compra')
+      const msg = mensajeError(err, esEdicion ? 'Error al actualizar compra' : 'Error al crear compra')
       setSnack({ open: true, msg, severity: 'error' })
     }
   }

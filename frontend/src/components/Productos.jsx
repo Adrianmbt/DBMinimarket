@@ -13,6 +13,7 @@ import Paginador from './Paginador'
 import { usePaginacion } from '../hooks/usePaginacion'
 import { limpiarNumero } from '../utils/num'
 import { readSession } from '../utils/session'
+import { mensajeError } from '../utils/error'
 
 const emptyProduct = {
   barcode: '', name: '', description: '', cost_price: 0, sale_price: 0,
@@ -125,7 +126,7 @@ export default function Productos() {
       setEditId(null)
       load()
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Error al guardar'
+      const msg = mensajeError(err, 'Error al guardar')
       setSnack({ open: true, msg, severity: 'error' })
     }
   }
@@ -173,7 +174,7 @@ export default function Productos() {
       load()
       if (tab === 1) loadBajas()
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Error al Eliminar'
+      const msg = mensajeError(err, 'Error al Eliminar')
       setSnack({ open: true, msg, severity: 'error' })
     }
   }
@@ -186,7 +187,7 @@ export default function Productos() {
       load()
       loadBajas()
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Error al restaurar'
+      const msg = mensajeError(err, 'Error al restaurar')
       setSnack({ open: true, msg, severity: 'error' })
     }
   }
@@ -198,7 +199,7 @@ export default function Productos() {
       setSnack({ open: true, msg: 'Producto reactivado correctamente', severity: 'success' })
       load()
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Error al reactivar'
+      const msg = mensajeError(err, 'Error al reactivar')
       setSnack({ open: true, msg, severity: 'error' })
     }
   }

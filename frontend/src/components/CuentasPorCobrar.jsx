@@ -132,7 +132,7 @@ export default function CuentasPorCobrar() {
       setCuentaSeleccionada(null)
       loadData()
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Error al marcar como pagada'
+      const msg = mensajeError(err, 'Error al marcar como pagada')
       setSnack({ open: true, msg, severity: 'error' })
     } finally {
       setPagando(false)

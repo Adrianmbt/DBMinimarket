@@ -46,7 +46,7 @@ export default function Login() {
     } catch (err) {
       const status = err?.response?.status
       if (status === 429) {
-        setError(err?.response?.data?.detail || 'Demasiados intentos. Intenta más tarde.')
+        setError(mensajeError(err, 'Demasiados intentos. Intenta más tarde.'))
       } else {
         setError('Error de conexión con el servidor')
       }

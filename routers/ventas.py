@@ -224,6 +224,31 @@ def realizar_cierre(
     )
 
 
+@router.delete("/cierre")
+def abrir_caja(
+    fecha: str | None = None,
+    db: Session = Depends(get_db),
+    user: object = Depends(get_current_user),
+):
+    """Reabre la caja de un día (por defecto hoy) eliminando su cierre Z.
+
+    Pensado para recuperarse de un cierre accidental o de un fallo de fecha
+    (p.ej. la caja quedó cerrada por cambio de fecha a medianoche). Requiere
+    rol de administrador. Al eliminarse el cierre, las ventas que tuviera el
+    día vuelven a contabilizarse dentro de ese mismo día (que queda abierto),
+    y se sumarán al total del próximo cierre. Si el cierre era real, deberá
+    rehacerse al final del día.
+    """
+    requiere_admin(user)
+    dia = _parse_fecha(fecha)
+    existente = db.query(CierreDiario).filter(CierreDiario.fecha == dia).first()
+    if not existente:
+        raise HTTPException(404, f"La caja del {dia.isoformat()} no está cerrada. No hay nada que abrir.")
+    db.delete(existente)
+    db.commit()
+    return {"fecha": dia.isoformat(), "abierta": True}
+
+
 @router.get("/cierre/pdf")
 def descargar_reporte_z(
     fecha: str | None = None,

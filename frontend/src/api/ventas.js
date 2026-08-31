@@ -7,6 +7,7 @@ export const deleteVenta = (id) => api.delete(`/ventas/${id}`)
 export const getEstadoCierre = () => api.get('/ventas/cierre/estado')
 export const getResumenDia = (fecha) => api.get('/ventas/resumen', { params: { fecha } })
 export const cerrarCaja = () => api.post('/ventas/cierre', null, { responseType: 'blob' })
+export const abrirCaja = () => api.delete('/ventas/cierre')
 
 const downloadBlob = (res, filename) => {
   const url = window.URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }))

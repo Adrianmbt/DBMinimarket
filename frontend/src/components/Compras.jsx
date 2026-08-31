@@ -10,6 +10,7 @@ import Paginador from './Paginador'
 import { usePaginacion } from '../hooks/usePaginacion'
 import NuevaCompraDialog from './NuevaCompraDialog'
 import VerCompraDialog from './VerCompraDialog'
+import { mensajeError } from '../utils/error'
 
 const formatNumber = (n) => {
   if (n === undefined || n === null) return '—'
@@ -119,7 +120,7 @@ export default function Compras() {
       setDeleteTarget(null)
       load()
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Error al eliminar la compra'
+      const msg = mensajeError(err, 'Error al eliminar la compra')
       setSnack({ open: true, msg, severity: 'error' })
     } finally {
       setDeleting(false)

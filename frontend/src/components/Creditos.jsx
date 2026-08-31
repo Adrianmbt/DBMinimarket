@@ -22,6 +22,7 @@ import { createVenta } from '../api/ventas'
 import { formatNumber } from './Ventas'
 import Paginador from './Paginador'
 import { usePaginacion } from '../hooks/usePaginacion'
+import { mensajeError } from '../utils/error'
 
 const money = (n, code) => {
   const val = formatNumber(n)
@@ -265,7 +266,7 @@ export default function Creditos() {
       setCuentaSeleccionada(null)
       loadData()
     } catch (err) {
-      setSnack({ open: true, msg: err.response?.data?.detail || 'Error al registrar el cobro', severity: 'error' })
+      setSnack({ open: true, msg: mensajeError(err, 'Error al registrar el cobro'), severity: 'error' })
     } finally { setPagando(false) }
   }
 
@@ -315,7 +316,7 @@ export default function Creditos() {
       setEditCuenta(null)
       loadData()
     } catch (err) {
-      setSnack({ open: true, msg: err.response?.data?.detail || 'Error al actualizar la cuenta', severity: 'error' })
+      setSnack({ open: true, msg: mensajeError(err, 'Error al actualizar la cuenta'), severity: 'error' })
     } finally {
       setEditSaving(false)
     }
@@ -341,7 +342,7 @@ export default function Creditos() {
       setDeleteTarget(null)
       loadData()
     } catch (err) {
-      setSnack({ open: true, msg: err.response?.data?.detail || 'Error al eliminar la cuenta', severity: 'error' })
+      setSnack({ open: true, msg: mensajeError(err, 'Error al eliminar la cuenta'), severity: 'error' })
     } finally {
       setDeleting(false)
     }
@@ -478,7 +479,7 @@ export default function Creditos() {
       setCreditDialogOpen(false)
       loadData()
     } catch (err) {
-      setSnack({ open: true, msg: err.response?.data?.detail || 'Error al registrar venta a crédito', severity: 'error' })
+      setSnack({ open: true, msg: mensajeError(err, 'Error al registrar venta a crédito'), severity: 'error' })
     } finally { setSubmitting(false) }
   }
 

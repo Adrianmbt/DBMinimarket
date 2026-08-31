@@ -233,7 +233,7 @@ export default function VentaCredito({ open, onClose, onVentaCreada }) {
       onVentaCreada?.()
       onClose()
     } catch (err) {
-      const msg = err.response?.data?.detail || 'Error al registrar venta a crédito'
+      const msg = mensajeError(err, 'Error al registrar venta a crédito')
       setSnack({ open: true, msg, severity: 'error' })
     } finally {
       setSubmitting(false)
