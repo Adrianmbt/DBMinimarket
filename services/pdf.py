@@ -10,6 +10,8 @@ from reportlab.platypus import (
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
+from time_ve import de_utc_naive
+
 VERDE = colors.HexColor("#2D5A1E")
 CAFE = colors.HexColor("#2C1810")
 GRIS = colors.HexColor("#6B5344")
@@ -18,6 +20,73 @@ AMBER = colors.HexColor("#C9952A")
 CREMA = colors.HexColor("#FFF8F0")
 
 BS_METHODS = {"Bolívares Efectivo", "Bolívares", "Efectivo", "Pago Móvil", "Transferencia", "Biopago", "Punto"}
+
+# Alias del efectivo en dólares del formato antiguo de pago mixto "Mixto ($ + X)".
+_ALIAS_METODO = {"$": "Dólares Efectivo"}
+
+
+def _es_bs(metodo: str | None) -> bool:
+    return (metodo or "") in BS_METHODS
+
+
+def parse_mixto(method: str | None) -> tuple[str, str] | None:
+    """Extrae las dos patas de un método 'Mixto (A + B)'; None si no es mixto.
+
+    Admite el alias '$' = 'Dólares Efectivo' usado por las ventas antiguas.
+    """
+    m = (method or "").strip()
+    if not m.startswith("Mixto (") or not m.endswith(")"):
+        return None
+    internas = m[len("Mixto ("):-1]
+    partes = [p.strip() for p in internas.split(" + ")]
+    if len(partes) != 2 or not all(partes):
+        return None
+    return _ALIAS_METODO.get(partes[0], partes[0]), _ALIAS_METODO.get(partes[1], partes[1])
+
+
+def patas_pago(venta, taux: float | None = None) -> list[tuple[str, float, float]]:
+    """Desglosa el pago de una venta en patas (metodo, usd, bs).
+
+    Venta simple -> una pata por el total. Venta mixta -> una pata por método,
+    usando los montos recibidos (lo que realmente entró). El IGTF no se
+    reparte aquí; solo se atribuye el cobro a cada método.
+    """
+    rate = venta.rate_usd or taux or 1.0
+    parsed = parse_mixto(venta.payment_method)
+    if not parsed:
+        metodo = venta.payment_method or "Sin método"
+        total = venta.total or 0.0
+        if _es_bs(metodo):
+            return [(metodo, total, total * rate)]
+        return [(metodo, total, 0.0)]
+
+    a, b = parsed
+    rec_usd = venta.received_usd or 0.0
+    rec_bs = venta.received_bs or 0.0
+    rec_2 = venta.received_2
+    a_bs, b_bs = _es_bs(a), _es_bs(b)
+
+    if a_bs and b_bs:
+        # Dos patas en Bs: la segunda va en received_2 y la primera es el resto.
+        b_native = rec_2 if rec_2 is not None else 0.0
+        a_native = rec_bs - b_native
+    elif a_bs and not b_bs:
+        # Primera en Bs, segunda en USD (efectivo).
+        a_native = rec_bs
+        b_native = rec_2 if rec_2 is not None else rec_usd
+    elif not a_bs and b_bs:
+        # Primera en USD (efectivo), segunda en Bs.
+        a_native = rec_usd
+        b_native = rec_2 if rec_2 is not None else rec_bs
+    else:
+        # Ambas en USD: la segunda va en received_2 y la primera es el resto.
+        b_native = rec_2 if rec_2 is not None else 0.0
+        a_native = rec_usd - b_native
+
+    return [
+        (a, a_native if not a_bs else a_native / rate, a_native if a_bs else 0.0),
+        (b, b_native if not b_bs else b_native / rate, b_native if b_bs else 0.0),
+    ]
 
 
 def _fmt(n: float) -> str:
@@ -50,7 +119,13 @@ class _StyleSet:
 
 
 def _fecha(fecha) -> str:
-    return fecha.strftime("%d/%m/%Y %H:%M") if fecha else "—"
+    """Fecha/hora legible de un timestamp UTC naive, en hora de Venezuela."""
+    return de_utc_naive(fecha).strftime("%d/%m/%Y %H:%M") if fecha else "—"
+
+
+def _hora(fecha) -> str:
+    """Hora de Venezuela de un timestamp UTC naive."""
+    return de_utc_naive(fecha).strftime("%H:%M") if fecha else "—"
 
 
 def _fecha_cierre(fecha) -> str:
@@ -195,6 +270,9 @@ def generar_pdf_factura(venta, taux=None) -> BytesIO:
     igtf = conv(igtf_raw)
 
     moneda = "BOLÍVARES (VES)" if emite_bs else "DÓLARES (USD)"
+    refs = venta.reference or "—"
+    if getattr(venta, "reference_2", None):
+        refs = f"{refs} / {venta.reference_2}"
     if emite_bs:
         datos = [
             Paragraph("<b>Fecha:</b> " + _fecha(venta.created_at), s.td),
@@ -202,7 +280,7 @@ def generar_pdf_factura(venta, taux=None) -> BytesIO:
             Paragraph("<b>Método:</b> " + metodo, s.td),
             Paragraph(f"<b>Tasa BCV:</b> Bs. {_fmt(rate)} por $1", s.td),
             Paragraph("<b>Cliente:</b> " + (venta.client_name or "Consumidor final"), s.td),
-            Paragraph("<b>Referencia:</b> " + (venta.reference or "—"), s.td),
+            Paragraph("<b>Referencia:</b> " + refs, s.td),
         ]
         story.append(Table([datos[0:3], datos[3:6]], colWidths=[100 * mm, 100 * mm]))
     else:
@@ -211,7 +289,7 @@ def generar_pdf_factura(venta, taux=None) -> BytesIO:
             Paragraph("<b>Moneda:</b> " + moneda, s.td),
             Paragraph("<b>Método:</b> " + metodo, s.td),
             Paragraph("<b>Cliente:</b> " + (venta.client_name or "Consumidor final"), s.td),
-            Paragraph("<b>Referencia:</b> " + (venta.reference or "—"), s.td),
+            Paragraph("<b>Referencia:</b> " + refs, s.td),
         ]
         story.append(Table([datos[0:3], datos[3:5]], colWidths=[100 * mm, 100 * mm]))
     story.append(Spacer(1, 3 * mm))
@@ -284,8 +362,13 @@ def generar_pdf_factura(venta, taux=None) -> BytesIO:
     return buf
 
 
-def generar_pdf_cierre(ventas, fecha, taux=None) -> BytesIO:
-    """Reporte Z de cierre diario de caja."""
+def generar_pdf_cierre(ventas, fecha, taux=None, es_preview=False) -> BytesIO:
+    """Reporte Z de cierre diario de caja.
+
+    Con ``es_preview=True`` el documento NO cierra la caja: solo lista las ventas
+    del día. El título y el pie lo dejan explícito para que no se confunda con el
+    reporte definitivo ni se archive como tal.
+    """
     buf = BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=letter,
@@ -298,20 +381,21 @@ def generar_pdf_cierre(ventas, fecha, taux=None) -> BytesIO:
     total_usd = 0.0
     total_bs = 0.0
     for v in ventas:
-        method = v.payment_method or "Sin método"
-        grp = grupos.setdefault(method, {"n": 0, "usd": 0.0, "bs": 0.0})
-        grp["n"] += 1
-        grp["usd"] += v.total or 0.0
         total_usd += v.total or 0.0
-        rate = v.rate_usd or taux or 1.0
-        if method in BS_METHODS:
-            bs = (v.total or 0.0) * rate
+        # Reparte el cobro entre métodos (soporta pago mixto de dos métodos).
+        for metodo, usd, bs in patas_pago(v, taux):
+            grp = grupos.setdefault(metodo, {"n": 0, "usd": 0.0, "bs": 0.0})
+            grp["n"] += 1
+            grp["usd"] += usd
             grp["bs"] += bs
             total_bs += bs
 
     story = []
 
-    _brand_header(story, f"Reporte Z — Cierre del {_fecha_cierre(fecha)}")
+    if es_preview:
+        _brand_header(story, f"Reporte Z — Previsualización (caja abierta) del {_fecha_cierre(fecha)}")
+    else:
+        _brand_header(story, f"Reporte Z — Cierre del {_fecha_cierre(fecha)}")
 
     resumen = Table(
         [
@@ -360,15 +444,8 @@ def generar_pdf_cierre(ventas, fecha, taux=None) -> BytesIO:
     hdr2 = ["#", "Hora", "Método", "Total (USD)", "Total (Bs)"]
     filas2 = [hdr2]
     for v in ventas:
-        hora = v.created_at.strftime("%H:%M") if v.created_at else "—"
-        metodo_v = v.payment_method or ""
-        if metodo_v.startswith("Mixto"):
-            # Mixto ($ + Bs): a bolívares entró exactamente lo recibido en Bs.
-            bs = v.received_bs or 0.0
-        elif metodo_v in BS_METHODS:
-            bs = (v.total or 0.0) * (v.rate_usd or taux or 1.0)
-        else:
-            bs = 0.0
+        hora = _hora(v.created_at)
+        bs = sum(p[2] for p in patas_pago(v, taux))
         filas2.append([
             Paragraph(str(v.id), s.td), Paragraph(hora, s.td),
             Paragraph(v.payment_method or "—", s.td),
@@ -388,6 +465,16 @@ def generar_pdf_cierre(ventas, fecha, taux=None) -> BytesIO:
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
     ]))
     story.append(tbl2)
+
+    if es_preview:
+        story.append(Spacer(1, 5 * mm))
+        story.append(Paragraph(
+            "<b>PREVISUALIZACIÓN — ESTE DOCUMENTO NO CIERRA LA CAJA.</b><br/>"
+            "Solo resume las ventas registradas hasta el momento de generarlo. "
+            "La caja sigue abierta y se pueden registrar más ventas para esta fecha. "
+            "El reporte Z definitivo se genera al realizar el cierre del día.",
+            s.sub,
+        ))
 
     doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
     buf.seek(0)

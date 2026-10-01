@@ -3,12 +3,13 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import func
-from datetime import datetime, timezone, timedelta, date
+from datetime import datetime, timezone, timedelta
 from database import get_db
 from models import CuentaCredito, Sale, SaleDetail, Product, PagoCredito
 from schemas import CuentaCreditoResponse, CreditoResumen, CuentaCreditoUpdate, PagarCuentaRequest
 from security import get_current_user, requiere_admin
 from routers.ventas import _validar_caja_abierta, _default_rate
+from time_ve import hoy_ve, dia_de_utc_naive
 
 router = APIRouter(prefix="/api/creditos", tags=["Crédito"])
 
@@ -59,7 +60,7 @@ def cuentas_proximas_vencer(
 ):
     """Cuentas pendientes que vencen dentro de los próximos N días (default 3)."""
     requiere_admin(user)
-    hoy = date.today()
+    hoy = hoy_ve()
     limite = hoy + timedelta(days=dias)
 
     cuentas = db.query(CuentaCredito).options(
@@ -248,8 +249,10 @@ def actualizar_cuenta(
             cuenta.sale.client_name = nombre
 
     if data.days_term is not None and data.days_term != cuenta.days_term:
-        # Recalcula el vencimiento conservando el ancla actual
-        ancla = cuenta.due_date or cuenta.created_at.date()
+        # Recalcula el vencimiento conservando el ancla actual. El ancla va en
+        # día de Venezuela: created_at es UTC y su .date() crudo correría el día
+        # de las ventas de la tarde-noche.
+        ancla = cuenta.due_date or dia_de_utc_naive(cuenta.created_at)
         cuenta.due_date = ancla + timedelta(days=data.days_term - (cuenta.days_term or 0))
         cuenta.days_term = data.days_term
 

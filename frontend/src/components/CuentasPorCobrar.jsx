@@ -1,3 +1,4 @@
+import { aFechaVE } from '../utils/date'
 import { useState, useEffect } from 'react'
 import {
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
@@ -22,7 +23,7 @@ const money = (n, code) => {
 
 const formatFecha = (dateStr) => {
   if (!dateStr) return '—'
-  const d = new Date(dateStr)
+  const d = aFechaVE(dateStr)
   const dia = String(d.getDate()).padStart(2, '0')
   const mes = String(d.getMonth() + 1).padStart(2, '0')
   const anio = d.getFullYear()
@@ -33,7 +34,7 @@ const formatFecha = (dateStr) => {
 
 const formatFechaCorta = (dateStr) => {
   if (!dateStr) return '—'
-  const d = new Date(dateStr)
+  const d = aFechaVE(dateStr)
   const dia = String(d.getDate()).padStart(2, '0')
   const mes = String(d.getMonth() + 1).padStart(2, '0')
   const anio = d.getFullYear()

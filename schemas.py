@@ -111,6 +111,10 @@ class SaleCreate(BaseModel):
     # Cambio a devolver (en la moneda en que se cobra)
     change_bs: Optional[float] = None
     change_usd: Optional[float] = None
+    # Segunda pata de un cobro mixto (método, monto en su moneda nativa y referencia)
+    method_2: Optional[str] = None
+    received_2: Optional[float] = None
+    reference_2: Optional[str] = None
     # Venta a crédito (solo admin)
     is_credit: bool = False
     # Plazo de crédito en días (7, 10 o 15)
@@ -131,6 +135,9 @@ class SaleUpdate(BaseModel):
     reference: Optional[str] = None
     received_bs: Optional[float] = Field(None, ge=0)
     received_usd: Optional[float] = Field(None, ge=0)
+    method_2: Optional[str] = None
+    received_2: Optional[float] = Field(None, ge=0)
+    reference_2: Optional[str] = None
     items: Optional[List[SaleDetailCreate]] = None
 
 
@@ -146,6 +153,9 @@ class SaleResponse(SaleBase):
     received_usd: Optional[float] = None
     change_bs: Optional[float] = None
     change_usd: Optional[float] = None
+    method_2: Optional[str] = None
+    received_2: Optional[float] = None
+    reference_2: Optional[str] = None
     is_credit: bool = False
     cuenta_id: Optional[int] = None
     details: List[SaleDetailResponse]

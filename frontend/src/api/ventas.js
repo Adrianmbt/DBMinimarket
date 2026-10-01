@@ -1,4 +1,5 @@
 import api from './axios'
+import { hoyISO } from '../utils/date'
 
 export const getVentas = (fecha) => api.get('/ventas', { params: fecha ? { fecha } : {} })
 export const createVenta = (data) => api.post('/ventas', data)
@@ -6,8 +7,15 @@ export const updateVenta = (id, data) => api.put(`/ventas/${id}`, data)
 export const deleteVenta = (id) => api.delete(`/ventas/${id}`)
 export const getEstadoCierre = () => api.get('/ventas/cierre/estado')
 export const getResumenDia = (fecha) => api.get('/ventas/resumen', { params: { fecha } })
-export const cerrarCaja = () => api.post('/ventas/cierre', null, { responseType: 'blob' })
-export const abrirCaja = () => api.delete('/ventas/cierre')
+export const cerrarCaja = async (fecha) => {
+  const res = await api.post('/ventas/cierre', null, {
+    params: fecha ? { fecha } : {},
+    responseType: 'blob',
+  })
+  // El endpoint ya devuelve el reporte Z definitivo del día cerrado.
+  downloadBlob(res, `reporte_z_${fecha || hoyISO()}.pdf`)
+}
+export const abrirCaja = (fecha) => api.delete('/ventas/cierre', { params: fecha ? { fecha } : {} })
 
 const downloadBlob = (res, filename) => {
   const url = window.URL.createObjectURL(new Blob([res.data], { type: 'application/pdf' }))
@@ -20,9 +28,10 @@ const downloadBlob = (res, filename) => {
   window.URL.revokeObjectURL(url)
 }
 
+
 export const descargarReporteZ = async (fecha) => {
   const res = await api.get('/ventas/cierre/pdf', { params: fecha ? { fecha } : {}, responseType: 'blob' })
-  downloadBlob(res, `reporte_z_${fecha || new Date().toISOString().slice(0, 10)}.pdf`)
+  downloadBlob(res, `ventas_${fecha || hoyISO()}.pdf`)
 }
 
 export const descargarFactura = async (id) => {

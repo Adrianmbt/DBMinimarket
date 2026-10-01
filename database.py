@@ -50,6 +50,9 @@ def habilitar_columnas(db):
             "igtf_amount": "FLOAT DEFAULT 0",
             "is_credit": "BOOLEAN DEFAULT 0",
             "cuenta_id": "INTEGER",
+            "method_2": "VARCHAR",
+            "received_2": "FLOAT",
+            "reference_2": "VARCHAR",
         },
         "cierres_diarios": {
             "total_iva_usd": "FLOAT DEFAULT 0",

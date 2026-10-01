@@ -1,4 +1,4 @@
-from datetime import datetime, timezone, timedelta
+from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func, case
@@ -7,6 +7,7 @@ from models import Product, Sale, SaleDetail, Category, ExchangeRate
 from schemas import DashboardResponse, SerieDia, TopItem, MetodoItem
 from services.bcv import DEFAULT_RATE
 from security import get_current_user
+from time_ve import rango_dia_ve, ahora_ve as _ahora_ve
 
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
 
@@ -23,20 +24,22 @@ _DIAS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
 def get_dashboard(db: Session = Depends(get_db), user: object = Depends(get_current_user)):
     if user.role != "admin":
         raise HTTPException(403, "Acceso restringido a administradores")
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    today = now.date()
-    hoy_inicio = datetime.combine(today, datetime.min.time())
-    ayer_inicio = hoy_inicio - timedelta(days=1)
-    inicio_mes = datetime.combine(today.replace(day=1), datetime.min.time())
-    inicio_semana = datetime.combine(today - timedelta(days=6), datetime.min.time())
+    # El día de negocio es el de Venezuela y sus límites van en UTC naive
+    # (que es como se guarda created_at). Calcularlo con la fecha UTC movía el
+    # corte del día a las 20:00 hora de Venezuela.
+    today = _ahora_ve().date()
+    hoy_inicio, hoy_fin = rango_dia_ve(today)
+    ayer_inicio, _ = rango_dia_ve(today - timedelta(days=1))
+    inicio_mes, _ = rango_dia_ve(today.replace(day=1))
+    inicio_semana, _ = rango_dia_ve(today - timedelta(days=6))
 
     # ---- Totales del día (USD canónico) ----
     ventas_hoy = db.query(func.coalesce(func.sum(Sale.total), 0)).filter(
-        Sale.created_at >= hoy_inicio
+        Sale.created_at >= hoy_inicio, Sale.created_at < hoy_fin
     ).scalar() or 0.0
 
     transacciones_hoy = db.query(func.count(Sale.id)).filter(
-        Sale.created_at >= hoy_inicio
+        Sale.created_at >= hoy_inicio, Sale.created_at < hoy_fin
     ).scalar() or 0
 
     # ---- Ventas de ayer (para % de variación) ----
@@ -47,7 +50,7 @@ def get_dashboard(db: Session = Depends(get_db), user: object = Depends(get_curr
 
     # ---- Ventas del mes corriente ----
     ventas_mes = db.query(func.coalesce(func.sum(Sale.total), 0)).filter(
-        Sale.created_at >= inicio_mes
+        Sale.created_at >= inicio_mes, Sale.created_at < hoy_fin
     ).scalar() or 0.0
 
     # ---- Ganancia del día: (precio - costo) * cantidad * conversión ----
@@ -78,8 +81,7 @@ def get_dashboard(db: Session = Depends(get_db), user: object = Depends(get_curr
     serie_ventas7 = []
     for i in range(6, -1, -1):
         d = today - timedelta(days=i)
-        d0 = datetime.combine(d, datetime.min.time())
-        d1 = d0 + timedelta(days=1)
+        d0, d1 = rango_dia_ve(d)
         venta = db.query(func.coalesce(func.sum(Sale.total), 0)).filter(
             Sale.created_at >= d0, Sale.created_at < d1
         ).scalar() or 0.0

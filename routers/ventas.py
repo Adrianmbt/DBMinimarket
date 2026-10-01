@@ -2,15 +2,16 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, selectinload
 from collections import OrderedDict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from database import get_db
 from models import Product, Sale, SaleDetail, ExchangeRate, CierreDiario, CuentaCredito
 from services.bcv import DEFAULT_RATE
-from services.pdf import generar_pdf_cierre, generar_pdf_factura, BS_METHODS
+from services.pdf import generar_pdf_cierre, generar_pdf_factura, patas_pago
 from schemas import (
     SaleCreate, SaleUpdate, SaleResponse, CierreStatus, ReporteResumen, MetodoResumen, CierreResponse,
 )
 from security import get_current_user, requiere_admin
+from time_ve import hoy_ve, rango_dia_ve, dia_de_utc_naive
 
 router = APIRouter(prefix="/api/ventas", tags=["Ventas"])
 
@@ -46,13 +47,13 @@ def _desglose_impuestos(total: float, payment_method: str | None, fraccion_usd: 
 
 
 def _parse_fecha(fecha: str | None) -> object:
-    """Convierte una fecha YYYY-MM-DD a date; por defecto el día local de hoy."""
+    """Convierte una fecha YYYY-MM-DD a date; por defecto el día de hoy en Venezuela."""
     if fecha:
         try:
             return datetime.strptime(fecha, "%Y-%m-%d").date()
         except ValueError:
             raise HTTPException(422, "Fecha inválida. Usa el formato YYYY-MM-DD.")
-    return datetime.now().date()
+    return hoy_ve()
 
 
 def _default_rate(db: Session) -> float:
@@ -63,9 +64,9 @@ def _default_rate(db: Session) -> float:
 def _validar_caja_abierta(db: Session, venta: Sale):
     """Bloquea modificar/eliminar una venta si la caja de su día ya fue cerrada (Reporte Z).
 
-    Los timestamps se guardan en UTC; convertimos al día local para ubicar el cierre.
+    Los timestamps se guardan en UTC; el día del negocio es el de Venezuela.
     """
-    dia_local = venta.created_at.replace(tzinfo=timezone.utc).astimezone().date()
+    dia_local = dia_de_utc_naive(venta.created_at)
     if db.query(CierreDiario).filter(CierreDiario.fecha == dia_local).first():
         raise HTTPException(
             409,
@@ -77,16 +78,10 @@ def _validar_caja_abierta(db: Session, venta: Sale):
 def _rango_dia_utc(dia):
     """Intervalo [inicio, fin) del día local `dia` expresado en UTC.
 
-    Los timestamps se guardan en UTC (models.utcnow), pero el "día" del
-    negocio es el local (Venezuela). Convertimos la medianoche local a UTC
-    para que una venta de las 9:00 pm cuente en el día correcto.
+    Delega en `time_ve.rango_dia_ve` para que el corte del día sea Venezuela
+    (00:00 local) y no el del sistema operativo.
     """
-    inicio_local = datetime.combine(dia, datetime.min.time()).astimezone()
-    fin_local = inicio_local + timedelta(days=1)
-    return (
-        inicio_local.astimezone(timezone.utc).replace(tzinfo=None),
-        fin_local.astimezone(timezone.utc).replace(tzinfo=None),
-    )
+    return rango_dia_ve(dia)
 
 
 def _ventas_de(db: Session, dia) -> list[Sale]:
@@ -111,21 +106,14 @@ def _resumen_fecha(db: Session, dia):
     total_igtf = 0.0
     metodos = OrderedDict()
     for v in ventas:
-        m = v.payment_method or "Sin método"
-        g = metodos.setdefault(m, {"n": 0, "usd": 0.0, "bs": 0.0})
-        g["n"] += 1
-        g["usd"] += v.total or 0.0
         total_usd += v.total or 0.0
         total_iva += v.iva_amount or 0.0
         total_igtf += v.igtf_amount or 0.0
-        rate = v.rate_usd or taux or 1.0
-        if (v.payment_method or "").startswith("Mixto"):
-            # Mixto ($ + Bs): a bolívares entra exactamente lo recibido en Bs.
-            bs = v.received_bs or 0.0
-            g["bs"] += bs
-            total_bs += bs
-        elif m in BS_METHODS:
-            bs = (v.total or 0.0) * rate
+        # Reparte el cobro entre métodos (soporta pago mixto de dos métodos).
+        for metodo, usd, bs in patas_pago(v, taux):
+            g = metodos.setdefault(metodo, {"n": 0, "usd": 0.0, "bs": 0.0})
+            g["n"] += 1
+            g["usd"] += usd
             g["bs"] += bs
             total_bs += bs
     return ventas, total_usd, total_bs, metodos, round(total_iva, 2), round(total_igtf, 2)
@@ -148,7 +136,7 @@ def _cierre_response(cierre) -> CierreResponse | None:
 @router.get("/cierre/estado", response_model=CierreStatus)
 def estado_cierre(db: Session = Depends(get_db), _: object = Depends(get_current_user)):
     """Estado de la caja de hoy: ¿ya se hizo el cierre Z? ¿cuánto lleva vendido?"""
-    dia = datetime.now().date()
+    dia = hoy_ve()
     cierre = db.query(CierreDiario).filter(CierreDiario.fecha == dia).first()
     _, total_usd, total_bs, metodos, _, _ = _resumen_fecha(db, dia)
     n = sum(g["n"] for g in metodos.values())
@@ -190,11 +178,13 @@ def realizar_cierre(
     db: Session = Depends(get_db),
     user: object = Depends(get_current_user),
 ):
-    """Realiza el cierre Z de un día (por defecto hoy).
+    """Reporte Z de cierre diario de caja. Requiere rol de administrador.
 
-    Genera el PDF del reporte Z y registra el cierre en la base de datos.
-    Una vez cerrado, NO se permiten más ventas para esa fecha.
+    Cierra el día indicado (por defecto hoy): registra el cierre en la base de
+    datos y bloquea nuevas ventas para esa fecha. Para solo consultar las ventas
+    del día sin cerrar nada, usar ``GET /api/ventas/cierre/pdf``.
     """
+    requiere_admin(user)
     dia = _parse_fecha(fecha)
     existente = db.query(CierreDiario).filter(CierreDiario.fecha == dia).first()
     if existente:
@@ -255,12 +245,16 @@ def descargar_reporte_z(
     db: Session = Depends(get_db),
     _: object = Depends(get_current_user),
 ):
-    """Re-descarga el reporte Z (cierre diario de caja) del día indicado (YYYY-MM-DD)."""
+    """Consulta las ventas del día indicado (YYYY-MM-DD) y devuelve su reporte Z
+    en PDF **sin cerrar la caja**: no registra el cierre ni bloquea el día, y
+    funciona igual con el día abierto o ya cerrado.
+    """
     dia = _parse_fecha(fecha)
     ventas = _ventas_de(db, dia)
 
-    buf = generar_pdf_cierre(ventas, dia, _default_rate(db))
-    filename = f"reporte_z_{dia.strftime('%Y%m%d')}.pdf"
+    buf = generar_pdf_cierre(ventas, dia, _default_rate(db), es_preview=True)
+    fecha_archivo = dia.strftime("%Y%m%d")
+    filename = f"ventas_{fecha_archivo}.pdf"
     return StreamingResponse(
         buf,
         media_type="application/pdf",
@@ -323,7 +317,7 @@ def crear_venta(
     db: Session = Depends(get_db),
     _: object = Depends(get_current_user),
 ):
-    dia = datetime.now().date()
+    dia = hoy_ve()
     if db.query(CierreDiario).filter(CierreDiario.fecha == dia).first():
         raise HTTPException(
             409,
@@ -413,6 +407,9 @@ def crear_venta(
         received_usd=received_usd if received_usd else None,
         change_bs=change_bs,
         change_usd=change_usd,
+        method_2=venta_data.method_2,
+        received_2=venta_data.received_2 if venta_data.received_2 else None,
+        reference_2=venta_data.reference_2,
         is_credit=is_credit,
         details=detalles,
     )
@@ -423,7 +420,7 @@ def crear_venta(
     if is_credit:
         total_bs_calc = total * rate
         days = venta_data.days_term if venta_data.days_term in (7, 10, 15) else 15
-        due = datetime.now().date() + timedelta(days=days)
+        due = hoy_ve() + timedelta(days=days)
         cuenta = CuentaCredito(
             sale_id=venta.id,
             client_name=venta_data.client_name.strip(),

@@ -4,11 +4,12 @@ import {
   Paper, Button, Dialog, DialogTitle, DialogContent, DialogActions,
   TextField, Typography, IconButton, MenuItem, Select, FormControl, InputLabel,
   Alert, Snackbar, Box, Chip, Avatar, Divider, Slide, Switch, FormControlLabel, Tooltip,
+  CircularProgress,
 } from '@mui/material'
 import {
   Add, Visibility, PointOfSale, Search, Close, AddCircle,
   RemoveCircle, Delete, ShoppingCart, Receipt, QrCodeScanner,
-  Lock, CalendarToday, AssignmentTurnedIn, Download, Edit, LockOpen,
+  Lock, CalendarToday, AssignmentTurnedIn, Edit, LockOpen,
   PriceCheck,
 } from '@mui/icons-material'
 import { getVentas, createVenta, updateVenta, deleteVenta, descargarReporteZ, descargarFactura, getEstadoCierre, getResumenDia, cerrarCaja, abrirCaja } from '../api/ventas'
@@ -17,6 +18,7 @@ import { getTasa } from '../api/tasa'
 import Paginador from './Paginador'
 import { usePaginacion } from '../hooks/usePaginacion'
 import { limpiarNumero } from '../utils/num'
+import { aFechaVE, hoyISO as hoyLocalISO } from '../utils/date'
 import { mensajeError } from '../utils/error'
 import ConsultaPrecios from './ConsultaPrecios'
 
@@ -32,7 +34,7 @@ const money = (n, code) => {
 
 const formatFecha = (dateStr) => {
   if (!dateStr) return '—'
-  const d = new Date(dateStr)
+  const d = aFechaVE(dateStr)
   const dia = String(d.getDate()).padStart(2, '0')
   const mes = String(d.getMonth() + 1).padStart(2, '0')
   const anio = d.getFullYear()
@@ -118,8 +120,12 @@ export default function Ventas() {
   const [mixed, setMixed] = useState(false)
   const [receivedBs, setReceivedBs] = useState('')
   const [receivedUsd, setReceivedUsd] = useState('')
-  const [mixedBsMethod, setMixedBsMethod] = useState('Bolívares Efectivo')
-  const [mixedRef, setMixedRef] = useState('')
+  const [mixedMethod1, setMixedMethod1] = useState('Dólares Efectivo')
+  const [mixedMethod2, setMixedMethod2] = useState('Bolívares Efectivo')
+  const [mixedAmount1, setMixedAmount1] = useState('')
+  const [mixedAmount2, setMixedAmount2] = useState('')
+  const [mixedRef1, setMixedRef1] = useState('')
+  const [mixedRef2, setMixedRef2] = useState('')
   const [cierreLoading, setCierreLoading] = useState(false)
   const [cierreEstado, setCierreEstado] = useState(null)
   const [cierreConfirmOpen, setCierreConfirmOpen] = useState(false)
@@ -128,6 +134,7 @@ export default function Ventas() {
   const [fechaFiltro, setFechaFiltro] = useState('')
   const [resumen, setResumen] = useState(null)
   const [resumenLoading, setResumenLoading] = useState(false)
+  const [previewLoading, setPreviewLoading] = useState(false)
 
   const searchRef = useRef(null)
   const resultsRef = useRef(null)
@@ -136,8 +143,11 @@ export default function Ventas() {
   const user = JSON.parse(rawUser || '{}')
   const isAdmin = user.role === 'admin'
 
-  const hoyISO = new Date().toISOString().slice(0, 10)
+  const hoyISO = hoyLocalISO()
   const cajaCerrada = cierreEstado?.cerrado === true
+  const diaConsultado = fechaFiltro || hoyISO
+  // El cierre Z solo aplica al día de hoy; el estado de caja lo refleja el backend.
+  const esHoy = diaConsultado === hoyISO
 
   const loadEstado = async () => {
     try {
@@ -166,14 +176,27 @@ export default function Ventas() {
     }
   }
 
+  const handlePreviewDia = async () => {
+    const dia = fechaFiltro || hoyISO
+    setPreviewLoading(true)
+    try {
+      await descargarReporteZ(dia)
+      setSnack({ open: true, msg: `PDF de las ventas del ${dia} descargado. La caja NO se cerró.`, severity: 'info' })
+    } catch (err) {
+      setSnack({ open: true, msg: mensajeError(err, 'No se pudo generar el PDF de ventas'), severity: 'error' })
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
+
   const handleCierreConfirmado = async () => {
+    const dia = fechaFiltro || hoyISO
     setCierreConfirmOpen(false)
     setCierreLoading(true)
     try {
-      await cerrarCaja()
-      await descargarReporteZ(hoyISO)
-      await Promise.all([aplicarFechaFiltro(hoyISO), loadEstado()])
-      setSnack({ open: true, msg: 'Cierre Z realizado. La caja de hoy quedó cerrada.', severity: 'success' })
+      await cerrarCaja(dia)
+      await Promise.all([aplicarFechaFiltro(dia), loadEstado()])
+      setSnack({ open: true, msg: `Cierre Z realizado. La caja del ${dia} quedó cerrada.`, severity: 'success' })
     } catch (err) {
       const msg = mensajeError(err, 'No se pudo realizar el cierre Z')
       setSnack({ open: true, msg, severity: 'error' })
@@ -183,12 +206,13 @@ export default function Ventas() {
   }
 
   const handleAbrirCaja = async () => {
+    const dia = diaConsultado
     setAbrirConfirmOpen(false)
     setAbrirLoading(true)
     try {
-      const res = await abrirCaja()
-      await Promise.all([aplicarFechaFiltro(hoyISO), loadEstado()])
-      setSnack({ open: true, msg: `Caja de ${res.data?.fecha || hoyISO} abierta. Ya puedes vender.`, severity: 'success' })
+      const res = await abrirCaja(dia)
+      await Promise.all([aplicarFechaFiltro(dia), loadEstado()])
+      setSnack({ open: true, msg: `Caja de ${res.data?.fecha || dia} abierta. Ya puedes vender.`, severity: 'success' })
     } catch (err) {
       const msg = mensajeError(err, 'No se pudo abrir la caja')
       setSnack({ open: true, msg, severity: 'error' })
@@ -451,8 +475,12 @@ export default function Ventas() {
     setMixed(false)
     setReceivedBs('')
     setReceivedUsd('')
-    setMixedBsMethod('Bolívares Efectivo')
-    setMixedRef('')
+    setMixedMethod1('Dólares Efectivo')
+    setMixedMethod2('Bolívares Efectivo')
+    setMixedAmount1('')
+    setMixedAmount2('')
+    setMixedRef1('')
+    setMixedRef2('')
     setShowResults(false)
     setOpenCreate(true)
     setTimeout(() => searchRef.current?.focus(), 200)
@@ -527,15 +555,27 @@ export default function Ventas() {
 
   const totalUSD = cart.reduce((sum, c) => sum + subtotalDe(c), 0)
   const tasaActual = tasa || 0
-  const totalCobrar = currencyOf(paymentMethod) === 'BS' ? totalUSD * tasaActual : totalUSD
-  const monedaTotal = currencyOf(paymentMethod)
+  // En cobro mixto la moneda de cobro/cambio es la de la primera pata.
+  const mixedCurrency1 = currencyOf(mixedMethod1)
+  const mixedCurrency2 = currencyOf(mixedMethod2)
+  const monedaTotal = mixed ? mixedCurrency1 : currencyOf(paymentMethod)
+  const totalCobrar = monedaTotal === 'BS' ? totalUSD * tasaActual : totalUSD
+
+  // Montos recibidos por pata en cobro mixto (cada uno en la moneda de su método).
+  const amt1 = parseFloat(String(mixedAmount1).replace(',', '.')) || 0
+  const amt2 = parseFloat(String(mixedAmount2).replace(',', '.')) || 0
+  const mixedBs1 = mixedCurrency1 === 'BS' ? amt1 : 0
+  const mixedUsd1 = mixedCurrency1 === 'USD' ? amt1 : 0
+  const mixedBs2 = mixedCurrency2 === 'BS' ? amt2 : 0
+  const mixedUsd2 = mixedCurrency2 === 'USD' ? amt2 : 0
 
   // Cobro recibido (en cada moneda) y desglose de impuestos en vivo
   // (misma fórmula que el backend): precios ya incluyen IVA/IGTF.
-  const recBs = parseFloat(String(receivedBs).replace(',', '.')) || 0
-  const recUsd = parseFloat(String(receivedUsd).replace(',', '.')) || 0
-  // En mixto, el IGTF aplica proporcional a la porción cubierta con $ efectivo.
-  const fraccionUsdMixto = mixed && totalUSD > 0 ? Math.min(Math.max(recUsd / totalUSD, 0), 1) : 0
+  const recBs = mixed ? (mixedBs1 + mixedBs2) : (parseFloat(String(receivedBs).replace(',', '.')) || 0)
+  const recUsd = mixed ? (mixedUsd1 + mixedUsd2) : (parseFloat(String(receivedUsd).replace(',', '.')) || 0)
+  // En mixto, el IGTF aplica solo sobre la porción pagada con $ efectivo.
+  const usdEfectivo = (mixedMethod1 === 'Dólares Efectivo' ? mixedUsd1 : 0) + (mixedMethod2 === 'Dólares Efectivo' ? mixedUsd2 : 0)
+  const fraccionUsdMixto = mixed && totalUSD > 0 ? Math.min(Math.max(usdEfectivo / totalUSD, 0), 1) : 0
   const tasaIgtfLive = mixed
     ? 0.03 * fraccionUsdMixto
     : (paymentMethod === 'Dólares Efectivo' ? 0.03 : 0)
@@ -555,6 +595,11 @@ export default function Ventas() {
   const cambio = (totalCobrar > 0 && recibeTotal > 0) ? recibeTotal - totalCobrar : null
   const montoInsuficiente = (totalCobrar > 0 && recibeTotal > 0 && recibeTotal < totalCobrar - 0.005) || recibeTotal <= 0
   const faltaUsd = Math.max(totalCobrar - recibeTotal, 0)
+  // Equivalente en la otra moneda (Bs <-> USD) para el cobro mixto.
+  const equivMoneda = monedaTotal === 'BS' ? 'USD' : 'BS'
+  const aEquiv = (monto) => (monedaTotal === 'BS' ? monto / (tasaActual || 1) : monto * tasaActual)
+  const faltaEquiv = aEquiv(faltaUsd)
+  const cambioEquiv = cambio == null ? 0 : aEquiv(cambio)
   const itemsCount = cart.reduce((sum, c) => sum + (c.sale_unit === 'peso' ? 1 : c.unitQty), 0)
 
   const handleSearchKeyDown = (e) => {
@@ -617,11 +662,14 @@ export default function Ventas() {
       setSnack({ open: true, msg: `Stock insuficiente para "${sinStockKg.name}"`, severity: 'error' })
       return
     }
-    const needsRef = mixed
-      ? METHODS_WITH_REFERENCE.includes(mixedBsMethod)
-      : METHODS_WITH_REFERENCE.includes(paymentMethod)
-    if (needsRef && !(mixed ? mixedRef : reference).trim()) {
-      setSnack({ open: true, msg: 'Ingresa la referencia bancaria del pago', severity: 'error' })
+    const needsRef1 = METHODS_WITH_REFERENCE.includes(mixed ? mixedMethod1 : paymentMethod)
+    const needsRef2 = mixed && METHODS_WITH_REFERENCE.includes(mixedMethod2)
+    if (needsRef1 && !(mixed ? mixedRef1 : reference).trim()) {
+      setSnack({ open: true, msg: 'Ingresa la referencia bancaria del primer método', severity: 'error' })
+      return
+    }
+    if (needsRef2 && !mixedRef2.trim()) {
+      setSnack({ open: true, msg: 'Ingresa la referencia bancaria del segundo método', severity: 'error' })
       return
     }
     if (montoInsuficiente) {
@@ -631,13 +679,16 @@ export default function Ventas() {
     setSubmitting(true)
     try {
       await createVenta({
-        payment_method: mixed ? `Mixto ($ + ${mixedBsMethod})` : paymentMethod,
+        payment_method: mixed ? `Mixto (${mixedMethod1} + ${mixedMethod2})` : paymentMethod,
         client_name: clientName.trim() || null,
-        reference: (mixed ? mixedRef : reference).trim() || null,
+        reference: (mixed ? mixedRef1 : reference).trim() || null,
         currency: monedaTotal,
         rate: tasaActual,
         received_bs: recBs > 0 ? recBs : null,
         received_usd: recUsd > 0 ? recUsd : null,
+        method_2: mixed ? mixedMethod2 : null,
+        received_2: mixed && amt2 > 0 ? amt2 : null,
+        reference_2: mixed ? (mixedRef2.trim() || null) : null,
         change_bs: monedaTotal === 'BS' && cambio != null ? Math.max(cambio, 0) : null,
         change_usd: monedaTotal === 'USD' && cambio != null ? Math.max(cambio, 0) : null,
         is_credit: false,
@@ -724,20 +775,36 @@ export default function Ventas() {
           </Button>
           <Button
             variant="outlined"
-            onClick={() => setCierreConfirmOpen(true)}
-            disabled={cierreLoading || cajaCerrada}
-            startIcon={<AssignmentTurnedIn />}
+            onClick={handlePreviewDia}
+            disabled={previewLoading}
+            startIcon={previewLoading ? <CircularProgress size={16} /> : <LockOpen />}
             sx={{
-              borderColor: 'rgba(201, 149, 42, 0.4)',
-              color: '#C9952A',
+              borderColor: 'rgba(45, 90, 30, 0.4)',
+              color: '#2D5A1E',
               borderRadius: 2.5, px: 3, py: 1.2,
               fontSize: '0.9rem', fontWeight: 600,
-              '&:hover': { borderColor: '#C9952A', bgcolor: 'rgba(201, 149, 42, 0.06)' },
-              '&.Mui-disabled': {
-                borderColor: 'rgba(45, 90, 30, 0.3)',
-                color: '#2D5A1E',
-              },
+              '&:hover': { borderColor: '#2D5A1E', bgcolor: 'rgba(45, 90, 30, 0.06)' },
               animation: 'fade-in-up 0.5s ease-out 0.2s both',
+            }}
+          >
+            {previewLoading ? 'Generando…' : 'Ver ventas del día (sin cerrar)'}
+          </Button>
+          <Button
+            variant="outlined"
+            onClick={() => setCierreConfirmOpen(true)}
+            disabled={cierreLoading || cajaCerrada || !isAdmin || !esHoy}
+            startIcon={<AssignmentTurnedIn />}
+            sx={{
+              borderColor: 'rgba(142, 27, 27, 0.4)',
+              color: '#8E1B1B',
+              borderRadius: 2.5, px: 3, py: 1.2,
+              fontSize: '0.9rem', fontWeight: 600,
+              '&:hover': { borderColor: '#8E1B1B', bgcolor: 'rgba(142, 27, 27, 0.06)' },
+              '&.Mui-disabled': {
+                borderColor: 'rgba(107, 83, 68, 0.25)',
+                color: 'rgba(107, 83, 68, 0.5)',
+              },
+              animation: 'fade-in-up 0.5s ease-out 0.25s both',
             }}
           >
             {cierreLoading ? 'Cerrando…' : cajaCerrada ? 'Caja cerrada ✓' : 'Cierre Z'}
@@ -807,6 +874,7 @@ export default function Ventas() {
             variant="outlined"
             startIcon={<Search />}
             disabled={resumenLoading}
+            onClick={() => aplicarFechaFiltro(fechaFiltro)}
             sx={{
               borderColor: 'rgba(201, 149, 42, 0.3)', color: '#6B5344', borderRadius: 2,
               fontSize: '0.75rem', fontWeight: 600, textTransform: 'none',
@@ -817,19 +885,15 @@ export default function Ventas() {
           </Button>
         )}
         {fechaFiltro && resumen && (
-          <Button
+          <Chip
+            icon={<LockOpen sx={{ fontSize: 14 }} />}
+            label={resumen.cerrado ? `Caja cerrada por ${resumen.cierre?.cerrado_por || '—'}` : 'Consulta — la caja NO se cierra'}
             size="small"
-            variant="outlined"
-            startIcon={<Download />}
-            onClick={() => descargarReporteZ(fechaFiltro)}
             sx={{
-              borderColor: 'rgba(45, 90, 30, 0.3)', color: '#2D5A1E', borderRadius: 2,
-              fontSize: '0.75rem', fontWeight: 600, textTransform: 'none',
-              '&:hover': { borderColor: '#2D5A1E', bgcolor: 'rgba(45, 90, 30, 0.06)' },
+              bgcolor: resumen.cerrado ? 'rgba(45, 90, 30, 0.1)' : 'rgba(45, 90, 30, 0.06)',
+              color: '#2D5A1E', fontWeight: 600, fontSize: '0.7rem',
             }}
-          >
-            Reporte Z de este día
-          </Button>
+          />
         )}
       </Box>
 
@@ -1365,70 +1429,116 @@ export default function Ventas() {
           }}>
             <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 2 }}>
               <Box sx={{ minWidth: 200, flex: 1 }}>
-                <FormControl size="small" fullWidth>
-                  <InputLabel sx={{ color: '#6B5344' }}>Método de Pago</InputLabel>
-                  <Select
-                    value={paymentMethod}
-                    label="Método de Pago"
-                    onChange={e => setPaymentMethod(e.target.value)}
-                    sx={{
-                      borderRadius: 2,
-                      bgcolor: '#FFF8F0',
-                      '& fieldset': { borderColor: 'rgba(201, 149, 42, 0.2)' },
-                      '&:hover fieldset': { borderColor: 'rgba(201, 149, 42, 0.4)' },
-                      '&.Mui-focused fieldset': { borderColor: '#C9952A' },
-                      fontWeight: 500,
-                    }}
-                  >
-                    {PAYMENT_OPTIONS.map(opt => (
-                      <MenuItem key={opt.value} value={opt.value}>
-                        {opt.icon} {opt.label}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-
-                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mt: 1.5 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5, gap: 2 }}>
                   <Typography sx={{ fontSize: '0.78rem', color: 'rgba(232, 99, 12, 0.75)' }}>
                     Tasa BCV: Bs. {formatNumber(tasaActual)}
                   </Typography>
                   <FormControlLabel
-                    control={<Switch size="small" checked={mixed} onChange={e => { setMixed(e.target.checked); if (!e.target.checked) { setReceivedBs(''); setReceivedUsd(''); setMixedBsMethod('Bolívares Efectivo'); setMixedRef('') } }} />}
-                    label={<Typography sx={{ fontSize: '0.78rem', color: '#6B5344' }}>Cobro mixto ($ efectivo + Bs)</Typography>}
+                    control={<Switch size="small" checked={mixed} onChange={e => { setMixed(e.target.checked); if (!e.target.checked) { setReceivedBs(''); setReceivedUsd(''); setMixedMethod1('Dólares Efectivo'); setMixedMethod2('Bolívares Efectivo'); setMixedAmount1(''); setMixedAmount2(''); setMixedRef1(''); setMixedRef2('') } }} />}
+                    label={<Typography sx={{ fontSize: '0.78rem', color: '#6B5344' }}>Cobro mixto (dos métodos)</Typography>}
                   />
                 </Box>
 
-                {/* Pago mixto: $ efectivo + método de pago en bolívares */}
+                {/* Cobro simple: un solo método. En mixto este campo se oculta
+                    para no dejar tres métodos compitiendo en pantalla. */}
+                {!mixed && (
+                  <FormControl size="small" fullWidth>
+                    <InputLabel sx={{ color: '#6B5344' }}>Método de Pago</InputLabel>
+                    <Select
+                      value={paymentMethod}
+                      label="Método de Pago"
+                      onChange={e => setPaymentMethod(e.target.value)}
+                      sx={{
+                        borderRadius: 2,
+                        bgcolor: '#FFF8F0',
+                        '& fieldset': { borderColor: 'rgba(201, 149, 42, 0.2)' },
+                        '&:hover fieldset': { borderColor: 'rgba(201, 149, 42, 0.4)' },
+                        '&.Mui-focused fieldset': { borderColor: '#C9952A' },
+                        fontWeight: 500,
+                      }}
+                    >
+                      {PAYMENT_OPTIONS.map(opt => (
+                        <MenuItem key={opt.value} value={opt.value}>
+                          {opt.icon} {opt.label}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                )}
+
+                {/* Pago mixto: dos métodos cualesquiera, uno por pata */}
                 {mixed && (
-                  <Box sx={{ mt: 1.5, display: 'grid', gap: 1.5 }}>
-                    <FormControl size="small" fullWidth>
-                      <InputLabel sx={{ color: '#6B5344' }}>Método de pago en Bolívares</InputLabel>
-                      <Select
-                        value={mixedBsMethod}
-                        label="Método de pago en Bolívares"
-                        onChange={e => setMixedBsMethod(e.target.value)}
-                        sx={{
-                          borderRadius: 2,
-                          bgcolor: '#FFF8F0',
-                          '& fieldset': { borderColor: 'rgba(201, 149, 42, 0.2)' },
-                          '&:hover fieldset': { borderColor: 'rgba(201, 149, 42, 0.4)' },
-                          '&.Mui-focused fieldset': { borderColor: '#C9952A' },
-                          fontWeight: 500,
-                        }}
-                      >
-                        {PAYMENT_OPTIONS.filter(o => o.currency === 'BS').map(opt => (
-                          <MenuItem key={opt.value} value={opt.value}>
-                            {opt.icon} {opt.label}
-                          </MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                    {METHODS_WITH_REFERENCE.includes(mixedBsMethod) && (
+                  <Box sx={{
+                    display: 'grid', gap: 1.5,
+                    p: 1.5, borderRadius: 2.5,
+                    bgcolor: 'rgba(45, 90, 30, 0.04)',
+                    border: '1px solid rgba(45, 90, 30, 0.14)',
+                    borderLeft: '3px solid #2D5A1E',
+                  }}>
+                    <Typography sx={{ fontSize: '0.7rem', color: '#2D5A1E', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                      Cobro en 2 partes
+                    </Typography>
+                    <Box sx={{ display: 'grid', gap: 1.5, gridTemplateColumns: '1fr 1fr' }}>
+                      <FormControl size="small" fullWidth>
+                        <InputLabel sx={{ color: '#6B5344' }}>Método 1</InputLabel>
+                        <Select
+                          value={mixedMethod1}
+                          label="Método 1"
+                          onChange={e => setMixedMethod1(e.target.value)}
+                          sx={{
+                            borderRadius: 2,
+                            bgcolor: '#FFF8F0',
+                            '& fieldset': { borderColor: 'rgba(201, 149, 42, 0.2)' },
+                            '&:hover fieldset': { borderColor: 'rgba(201, 149, 42, 0.4)' },
+                            '&.Mui-focused fieldset': { borderColor: '#C9952A' },
+                            fontWeight: 500,
+                          }}
+                        >
+                          {PAYMENT_OPTIONS.map(opt => (
+                            <MenuItem key={opt.value} value={opt.value}>
+                              {opt.icon} {opt.label}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                      <FormControl size="small" fullWidth>
+                        <InputLabel sx={{ color: '#6B5344' }}>Método 2</InputLabel>
+                        <Select
+                          value={mixedMethod2}
+                          label="Método 2"
+                          onChange={e => setMixedMethod2(e.target.value)}
+                          sx={{
+                            borderRadius: 2,
+                            bgcolor: '#FFF8F0',
+                            '& fieldset': { borderColor: 'rgba(201, 149, 42, 0.2)' },
+                            '&:hover fieldset': { borderColor: 'rgba(201, 149, 42, 0.4)' },
+                            '&.Mui-focused fieldset': { borderColor: '#C9952A' },
+                            fontWeight: 500,
+                          }}
+                        >
+                          {PAYMENT_OPTIONS.map(opt => (
+                            <MenuItem key={opt.value} value={opt.value}>
+                              {opt.icon} {opt.label}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Box>
+                    {METHODS_WITH_REFERENCE.includes(mixedMethod1) && (
                       <TextField
-                        label="Referencia bancaria (Bs)"
+                        label={`Referencia bancaria (${mixedMethod1})`}
                         size="small"
-                        value={mixedRef}
-                        onChange={e => setMixedRef(e.target.value)}
+                        value={mixedRef1}
+                        onChange={e => setMixedRef1(e.target.value)}
+                        placeholder="Ej: 00845123"
+                      />
+                    )}
+                    {METHODS_WITH_REFERENCE.includes(mixedMethod2) && (
+                      <TextField
+                        label={`Referencia bancaria (${mixedMethod2})`}
+                        size="small"
+                        value={mixedRef2}
+                        onChange={e => setMixedRef2(e.target.value)}
                         placeholder="Ej: 00845123"
                       />
                     )}
@@ -1438,24 +1548,23 @@ export default function Ventas() {
                 {/* Cobro recibido y cambio */}
                 {cart.length > 0 && (
                   <Box sx={{ mt: 1.5, display: 'grid', gap: 1.5, gridTemplateColumns: mixed ? '1fr 1fr' : '1fr', alignItems: 'start' }}>
-                    {mixed && (
-                      <TextField
-                        label="Recibe ($USD)"
-                        size="small"
-                        type="number"
-                        value={receivedUsd}
-                        onChange={e => setReceivedUsd(e.target.value)}
-                        slotProps={{ htmlInput: { min: 0, step: 0.01 } }}
-                      />
-                    )}
                     {mixed ? (
-                      <TextField
-                        label="Recibe (Bs)"
-                        type="number"
-                        value={receivedBs}
-                        onChange={e => setReceivedBs(e.target.value)}
-                        slotProps={{ htmlInput: { min: 0, step: 0.01 } }}
-                      />
+                      <>
+                        <TextField
+                          label={`Recibe ${mixedMethod1} (${mixedCurrency1 === 'BS' ? 'Bs' : '$'})`}
+                          type="number"
+                          value={mixedAmount1}
+                          onChange={e => setMixedAmount1(e.target.value)}
+                          slotProps={{ htmlInput: { min: 0, step: 0.01 } }}
+                        />
+                        <TextField
+                          label={`Recibe ${mixedMethod2} (${mixedCurrency2 === 'BS' ? 'Bs' : '$'})`}
+                          type="number"
+                          value={mixedAmount2}
+                          onChange={e => setMixedAmount2(e.target.value)}
+                          slotProps={{ htmlInput: { min: 0, step: 0.01 } }}
+                        />
+                      </>
                     ) : (
                       <TextField
                         label={monedaTotal === 'BS' ? 'Recibe en Bs' : 'Recibe en $'}
@@ -1468,13 +1577,9 @@ export default function Ventas() {
                     {recibeTotal > 0 && (
                       <Typography sx={{ fontSize: '0.8rem', color: montoInsuficiente ? '#C62828' : '#2D5A1E', fontWeight: 600, mt: 0.5, gridColumn: mixed ? '1 / -1' : 'auto' }}>
                         {montoInsuficiente
-                          ? mixed
-                            ? `Faltan ${money(faltaUsd * tasaActual, 'BS')} (${money(faltaUsd, 'USD')})`
-                            : `Faltan ${money(faltaUsd, monedaTotal)}`
+                          ? `Faltan ${money(faltaUsd, monedaTotal)}${mixed ? ` (${money(faltaEquiv, equivMoneda)})` : ''}`
                           : cambio != null
-                            ? mixed
-                              ? `Cambio a devolver: ${money(cambio * tasaActual, 'BS')} (${money(cambio, 'USD')})`
-                              : `Cambio a devolver: ${money(cambio, monedaTotal)}`
+                            ? `Cambio a devolver: ${money(cambio, monedaTotal)}${mixed ? ` (${money(cambioEquiv, equivMoneda)})` : ''}`
                             : ''}
                       </Typography>
                     )}
@@ -2162,10 +2267,28 @@ export default function Ventas() {
         </DialogTitle>
         <DialogContent sx={{ pt: 3, px: 3 }}>
           <Typography sx={{ color: '#2C1810', fontSize: '0.9rem', mb: 1.5 }}>
-            Se generará el reporte Z de hoy ({hoyISO}) y la caja quedará <b>cerrada</b>.
+            Se generará el reporte Z de hoy ({diaConsultado}) y la caja quedará <b>cerrada</b>.
           </Typography>
+          {resumen && resumen.total_ventas > 0 ? (
+            <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1.5, mb: 2, p: 1.5, borderRadius: 2, bgcolor: 'rgba(201, 149, 42, 0.08)', border: '1px solid rgba(201, 149, 42, 0.2)' }}>
+              <Box>
+                <Typography variant="caption" sx={{ color: '#6B5344', fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Ventas a congelar</Typography>
+                <Typography sx={{ fontWeight: 700, fontSize: '1.15rem', color: '#2C1810' }}>{resumen.total_ventas}</Typography>
+              </Box>
+              <Box>
+                <Typography variant="caption" sx={{ color: '#6B5344', fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Total a congelar</Typography>
+                <Typography sx={{ fontWeight: 700, fontSize: '1.15rem', color: '#2D5A1E' }}>${formatNumber(resumen.total_usd)}</Typography>
+              </Box>
+            </Box>
+          ) : (
+            <Alert severity="info" sx={{ borderRadius: 2, fontSize: '0.8rem', mb: 2 }}>
+              Si solo querías consultar cuántas ventas van, usa el botón de arriba
+              {' '}<b>Ver ventas del día (sin cerrar)</b>: no bloquea la caja.
+            </Alert>
+          )}
           <Alert severity="warning" sx={{ borderRadius: 2, fontSize: '0.8rem' }}>
-            Después de este cierre <b>no se podrán registrar más ventas</b> hasta mañana. ¿Deseas continuar?
+            Después de este cierre <b>no se podrán registrar, editar ni eliminar ventas</b> de hoy.
+            Si fue un error, un administrador puede revertirlo con <b>Abrir caja</b>. ¿Deseas continuar?
           </Alert>
         </DialogContent>
         <DialogActions sx={{ p: 2, px: 3, borderTop: '1px solid rgba(201, 149, 42, 0.08)', bgcolor: '#F8F5F0' }}>
@@ -2205,7 +2328,7 @@ export default function Ventas() {
         </DialogTitle>
         <DialogContent sx={{ pt: 3, px: 3 }}>
           <Typography sx={{ color: '#2C1810', fontSize: '0.9rem', mb: 1.5 }}>
-            Se abrirá la caja de hoy ({hoyISO}) y se podrán registrar ventas de nuevo.
+            Se abrirá la caja de {diaConsultado} y se podrán registrar ventas de nuevo.
           </Typography>
           <Alert severity="warning" sx={{ borderRadius: 2, fontSize: '0.8rem' }}>
             Las ventas que ya tenga hoy <b>se contarán dentro de hoy</b> y volverán a sumarse cuando hagas el cierre Z al final del día. Solo admin puede hacer esto.

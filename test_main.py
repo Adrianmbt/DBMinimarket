@@ -1,13 +1,15 @@
 import pytest
 from datetime import datetime, timezone
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from database import Base, get_db
 from main import app
-from models import Category, Product, ExchangeRate, User
+from models import Category, Product, ExchangeRate, Sale, SaleDetail, User
 from security import hash_password
+from time_ve import dia_de_utc_naive
 
 # Base de datos en memoria con StaticPool para preservar las tablas
 SQLALCHEMY_DATABASE_URL = "sqlite:///:memory:"
@@ -312,6 +314,44 @@ def test_venta_peso():
     assert client.get(f"/api/productos/{prod['id']}", headers=h).json()["stock"] == 3500
 
 
+def test_dashboard_dia_negocio_es_venezuela_no_utc():
+    """El día de negocio debe cambiar a medianoche de Venezuela, no a las 20:00.
+
+    Una venta registrada a las 21:30 hora de Venezuela se guarda como 01:30 UTC
+    del día siguiente. Si el corte del día fuera UTC (medianoche UTC = 20:00
+    Venezuela), el sistema "cambiaría de día" a las 8pm y dejaría de contar las
+    ventas de la tarde-noche. Este test congela el reloj para esa franja.
+    """
+    token = _login()
+    h = _auth(token)
+    cat = client.post("/api/categorias", json={"name": "Nocturno", "sale_unit": "unidad"}, headers=h).json()
+    prod = client.post("/api/productos", json={
+        "barcode": "N1", "name": "Refresco", "cost_price": 1.0, "sale_price": 2.0,
+        "stock": 50, "min_stock": 5, "category_id": cat["id"],
+    }, headers=h).json()
+
+    # 21:30 hora de Venezuela  ->  01:30 UTC del día siguiente
+    with TestingSessionLocal() as db:
+        db.add(Sale(
+            total=2.0, iva_amount=0.28, igtf_amount=0.0, rate_usd=400.0,
+            payment_method="Punto", created_at=datetime(2026, 9, 30, 1, 30),
+            details=[SaleDetail(product_id=prod["id"], quantity=1, price_at_sale=2.0, cost_price=1.0)],
+        ))
+        db.commit()
+
+    # Con el reloj congelado en 21:40 Venezuela (01:40 UTC), el día es 29/09.
+    with patch("routers.dashboard._ahora_ve", return_value=datetime(2026, 9, 29, 21, 40)):
+        d = client.get("/api/dashboard", headers=h).json()
+    assert d["ventas_hoy"] == 2.0, "la venta de las 21:30 debe contar como HOY"
+    assert d["transacciones_hoy"] == 1
+    # Al día siguiente (30/09) la venta ya no es de hoy. Con el corte en UTC
+    # seguía contándose porque su created_at cae dentro del "día" UTC.
+    with patch("routers.dashboard._ahora_ve", return_value=datetime(2026, 9, 30, 15, 0)):
+        manana = client.get("/api/dashboard", headers=h).json()
+    assert manana["ventas_hoy"] == 0.0
+    assert manana["transacciones_hoy"] == 0
+
+
 def test_dashboard():
     token = _login()
     h = _auth(token)
@@ -494,8 +534,7 @@ def test_abrir_caja_reabre_con_ventas_y_sin_ventas():
     h = _auth(token)
     prod, venta = _crear_venta(h, barcode="C9", name="Atún", precio=3.00, cantidad=1)
 
-    hoy = (datetime.fromisoformat(venta["created_at"])
-           .replace(tzinfo=timezone.utc).astimezone().date().isoformat())
+    hoy = (dia_de_utc_naive(datetime.fromisoformat(venta["created_at"])).isoformat())
 
     # Con ventas: el cierre se registra y al abrir vuelve a contarse en el día
     assert client.post("/api/ventas/cierre", headers=h).status_code == 200
@@ -527,8 +566,7 @@ def test_consultar_ventas_y_resumen_por_fecha():
     prod, venta = _crear_venta(h, barcode="C2", name="Harina", precio=1.50, cantidad=3)  # total 4.50
 
     # created_at viene en UTC; el día de negocio es el local (Venezuela, UTC-4)
-    hoy = (datetime.fromisoformat(venta["created_at"])
-           .replace(tzinfo=timezone.utc).astimezone().date().isoformat())
+    hoy = (dia_de_utc_naive(datetime.fromisoformat(venta["created_at"])).isoformat())
 
     # Listado filtrado por fecha
     lista = client.get(f"/api/ventas?fecha={hoy}", headers=h).json()
@@ -555,6 +593,65 @@ def test_consultar_ventas_y_resumen_por_fecha():
 
     # Fecha inválida da 422
     assert client.get("/api/ventas?fecha=no-es-fecha", headers=h).status_code == 422
+
+
+def test_pdf_ventas_no_cierra_la_caja_y_es_pdf_de_previsualizacion():
+    """Consultar el PDF del día NO debe cerrar la caja (regresión del cierre accidental).
+
+    Este es el escenario que reportaba el cliente: el propietario cerraba el día
+    solo para ver cuántas ventas llevaba.
+    """
+    token = _login()
+    h = _auth(token)
+    prod, venta = _crear_venta(h, barcode="C3", name="Azúcar Pan", precio=2.00, cantidad=2)
+
+    hoy = (dia_de_utc_naive(datetime.fromisoformat(venta["created_at"])).isoformat())
+
+    # El PDF de consulta se descarga, con nombre propio y sin tocar la base
+    pdf = client.get(f"/api/ventas/cierre/pdf?fecha={hoy}", headers=h)
+    assert pdf.status_code == 200
+    assert pdf.content.startswith(b"%PDF")
+    assert "ventas_" in pdf.headers["content-disposition"]
+    assert "reporte_z_" not in pdf.headers["content-disposition"]
+
+    # La caja sigue abierta: no se registró ningún cierre
+    est = client.get("/api/ventas/cierre/estado", headers=h).json()
+    assert est["cerrado"] is False
+    assert est["cierre"] is None
+    assert est["total_ventas_hoy"] == 1
+
+    # Y se pueden seguir registrando ventas (lo que el cierre previo impedía)
+    resp = client.post("/api/ventas", json={
+        "items": [{"product_id": prod["id"], "quantity": 1}],
+    }, headers=h)
+    assert resp.status_code == 200
+
+    # El PDF funciona igual con el día ya cerrado (solo lectura)
+    assert client.post("/api/ventas/cierre", headers=h).status_code == 200
+    assert client.get(f"/api/ventas/cierre/pdf?fecha={hoy}", headers=h).status_code == 200
+
+
+def test_cierre_z_requiere_admin():
+    """Cerrar la caja bloquea el día, así que solo un administrador puede hacerlo."""
+    h_admin = _auth(_login())
+    h_vendedor = _auth(_login("vendedor_cierre", "admin123", role="vendedor"))
+
+    # El admin crea el catálogo; el vendedor sí puede registrar ventas...
+    prod, _venta = _crear_venta(h_admin, barcode="C4", name="Leche", precio=2.50, cantidad=1)
+
+    # ...pero no cerrar la caja
+    resp = client.post("/api/ventas/cierre", headers=h_vendedor)
+    assert resp.status_code == 403
+
+    # El intento fallido no dejó el día cerrado
+    est = client.get("/api/ventas/cierre/estado", headers=h_admin).json()
+    assert est["cerrado"] is False
+    assert est["total_ventas_hoy"] == 1
+
+    # El admin sí puede cerrarla
+    assert client.post("/api/ventas/cierre", headers=h_admin).status_code == 200
+    assert client.get("/api/ventas/cierre/estado", headers=h_admin).json()["cerrado"] is True
+    assert prod["id"]
 
 
 def test_pago_mixto_metodo_bs_referencia_igtf_parcial():
@@ -588,15 +685,99 @@ def test_pago_mixto_metodo_bs_referencia_igtf_parcial():
     assert venta["igtf_amount"] is not None
     assert 0 < venta["igtf_amount"] < 0.15
 
-    # El resumen agrupa el método mixto y contabiliza los Bs recibidos
+    # El resumen desglosa el mixto por pata (alias '$' -> Dólares Efectivo)
     res = client.get("/api/ventas/resumen", headers=h).json()
     met = {m["metodo"]: m for m in res["metodos"]}
-    assert "Mixto ($ + Pago Móvil)" in met
-    assert abs(met["Mixto ($ + Pago Móvil)"]["bs"] - rec_bs) < 0.05
+    assert "Mixto ($ + Pago Móvil)" not in met
+    assert abs(met["Dólares Efectivo"]["usd"] - rec_usd) < 0.05
+    assert abs(met["Pago Móvil"]["bs"] - rec_bs) < 0.05
 
     # Factura y reporte Z se generan sin errores con método mixto
     assert client.get(f"/api/ventas/{venta['id']}/factura", headers=h).status_code == 200
     assert client.get("/api/ventas/cierre/pdf", headers=h).status_code == 200
+
+
+def test_pago_mixto_dos_metodos_bs_desglose_por_metodo():
+    """Cobro mixto con DOS métodos en Bs (Biopago + Pago Móvil): sin IGTF,
+    guarda la segunda pata (método, monto y referencia) y el reporte Z
+    desglosa el monto recibido por cada método."""
+    h = _auth(_login())
+    cat = client.post("/api/categorias", json={"name": "Mixtos2", "sale_unit": "unidad"}, headers=h).json()
+    prod = client.post("/api/productos", json={
+        "barcode": "MIXT2", "name": "Jugo 1L", "cost_price": 0.5, "sale_price": 2.00,
+        "stock": 50, "min_stock": 5, "category_id": cat["id"],
+    }, headers=h).json()
+
+    tasa = client.get("/api/tasa", headers=h).json()["rate"]
+    # Total: 4 x $2.00 = $8 -> Bs 8*tasa, mitad por cada método en Bs.
+    bs1 = round(4.0 * tasa, 2)   # Biopago
+    bs2 = round(4.0 * tasa, 2)   # Pago Móvil
+    r = client.post("/api/ventas", json={
+        "items": [{"product_id": prod["id"], "quantity": 4}],
+        "payment_method": "Mixto (Biopago + Pago Móvil)",
+        "currency": "BS",
+        "received_bs": round(bs1 + bs2, 2),
+        "method_2": "Pago Móvil",
+        "received_2": bs2,
+        "reference": "BIO-111",
+        "reference_2": "PM-222",
+    }, headers=h)
+    assert r.status_code == 200
+    venta = r.json()
+    assert venta["payment_method"] == "Mixto (Biopago + Pago Móvil)"
+    assert venta.get("method_2") == "Pago Móvil"
+    assert venta.get("received_2") == bs2
+    assert venta.get("reference_2") == "PM-222"
+
+    # Dos métodos en Bs -> no aplica IGTF
+    assert venta["igtf_amount"] == 0
+
+    # El resumen desglosa por método, no en un grupo "Mixto (...)"
+    res = client.get("/api/ventas/resumen", headers=h).json()
+    met = {m["metodo"]: m for m in res["metodos"]}
+    assert "Mixto (Biopago + Pago Móvil)" not in met
+    assert abs(met["Biopago"]["bs"] - bs1) < 0.05
+    assert abs(met["Pago Móvil"]["bs"] - bs2) < 0.05
+
+    assert client.get("/api/ventas/cierre/pdf", headers=h).status_code == 200
+
+
+def test_pago_mixto_usd_digital_referencia_por_pata():
+    """Cobro mixto $ efectivo + Biopago: IGTF proporcional a la porción en
+    dólares y referencia independiente por cada pata."""
+    h = _auth(_login())
+    cat = client.post("/api/categorias", json={"name": "Mixtos3", "sale_unit": "unidad"}, headers=h).json()
+    prod = client.post("/api/productos", json={
+        "barcode": "MIXT3", "name": "Agua 1.5L", "cost_price": 0.5, "sale_price": 2.00,
+        "stock": 50, "min_stock": 5, "category_id": cat["id"],
+    }, headers=h).json()
+
+    tasa = client.get("/api/tasa", headers=h).json()["rate"]
+    rec_usd = 4.0                    # mitad en $ efectivo
+    rec_bs2 = round(4.0 * tasa, 2)   # mitad por Biopago (Bs)
+    r = client.post("/api/ventas", json={
+        "items": [{"product_id": prod["id"], "quantity": 4}],
+        "payment_method": "Mixto (Dólares Efectivo + Biopago)",
+        "currency": "USD",
+        "received_usd": rec_usd,
+        "received_bs": rec_bs2,
+        "method_2": "Biopago",
+        "received_2": rec_bs2,
+        "reference_2": "BIO-333",
+    }, headers=h)
+    assert r.status_code == 200
+    venta = r.json()
+    assert venta.get("method_2") == "Biopago"
+    assert venta.get("reference_2") == "BIO-333"
+
+    # IGTF proporcional (fracción 50% en $): menos que el 3% completo
+    assert 0 < venta["igtf_amount"] < 0.15
+
+    # Desglose por método: Dólares Efectivo (USD) + Biopago (Bs)
+    res = client.get("/api/ventas/resumen", headers=h).json()
+    met = {m["metodo"]: m for m in res["metodos"]}
+    assert abs(met["Dólares Efectivo"]["usd"] - rec_usd) < 0.05
+    assert abs(met["Biopago"]["bs"] - rec_bs2) < 0.05
 
 
 # ==========================================

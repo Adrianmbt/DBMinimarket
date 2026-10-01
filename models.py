@@ -65,6 +65,10 @@ class Sale(Base):
     received_usd = Column(Float, nullable=True)
     change_bs = Column(Float, nullable=True)
     change_usd = Column(Float, nullable=True)
+    # Segunda pata de un cobro mixto (método, monto en su moneda nativa y referencia).
+    method_2 = Column(String, nullable=True)
+    received_2 = Column(Float, nullable=True)
+    reference_2 = Column(String, nullable=True)
     # Venta a crédito
     is_credit = Column(Boolean, default=False)
     cuenta_id = Column(Integer, ForeignKey("cuentas_credito.id"), nullable=True)
