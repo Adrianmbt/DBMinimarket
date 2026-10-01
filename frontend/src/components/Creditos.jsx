@@ -919,7 +919,14 @@ export default function Creditos() {
                             </Box>
                           )}
                         </TableCell>
-                        <TableCell align="right"><Typography sx={{ fontWeight: 700, fontSize: '0.9rem', color: '#2C1810' }}>{money(subtotalDe(c), 'USD')}</Typography></TableCell>
+                        <TableCell align="right">
+                          <Typography sx={{ fontWeight: 700, fontSize: '0.9rem', color: '#2C1810' }}>{money(subtotalDe(c), 'USD')}</Typography>
+                          {tasaActual > 0 && (
+                            <Typography variant="caption" sx={{ display: 'block', color: '#6B5344', fontWeight: 500 }}>
+                              Bs. {(subtotalDe(c) * tasaActual).toFixed(2)}
+                            </Typography>
+                          )}
+                        </TableCell>
                         <TableCell sx={{ p: 0.5 }}>
                           <IconButton size="small" onClick={() => removeFromCart(c.product_id)} aria-label={`Eliminar ${c.name} del carrito`} sx={{ color: '#C62828', opacity: 0.5, '&:hover': { opacity: 1, bgcolor: 'rgba(198, 40, 40, 0.08)' } }}><Delete fontSize="small" /></IconButton>
                         </TableCell>

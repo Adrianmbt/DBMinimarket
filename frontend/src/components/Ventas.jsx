@@ -1403,6 +1403,11 @@ export default function Ventas() {
                           <Typography sx={{ fontWeight: 700, fontSize: '0.9rem', color: '#2C1810' }}>
                             {money(subtotalDe(c), 'USD')}
                           </Typography>
+                          {tasaActual > 0 && (
+                            <Typography variant="caption" sx={{ display: 'block', color: '#6B5344', fontWeight: 500 }}>
+                              Bs. {(subtotalDe(c) * tasaActual).toFixed(2)}
+                            </Typography>
+                          )}
                         </TableCell>
                         <TableCell sx={{ p: 0.5 }}>
                           <IconButton
