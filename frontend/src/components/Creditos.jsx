@@ -5,18 +5,21 @@ import {
   Paper, Button, Typography, Chip, Box, Avatar, Alert, Snackbar,
   Dialog, DialogTitle, DialogContent, DialogActions, IconButton,
   TextField, MenuItem, Select, FormControl, InputLabel, Divider,
-  Slide, CircularProgress, Switch,
+  Slide, CircularProgress, Switch, useMediaQuery, Autocomplete,
+  ToggleButton, ToggleButtonGroup, Tooltip,
 } from '@mui/material'
 import {
   AccountBalanceWallet, Search, CheckCircle, Pending, Visibility,
   Close, Warning, Schedule, CreditCard, AddCircle, RemoveCircle,
   Delete, ShoppingCart, Receipt, QrCodeScanner, CalendarMonth, Edit,
+  People, PersonAdd, Group, ViewList,
 } from '@mui/icons-material'
 import {
   getCuentasCredito, registrarCobro, getResumenCredito,
   getProximasVencer, marcarNotificadas,
-  actualizarCuenta, eliminarCuenta,
+  actualizarCuenta, eliminarCuenta, pagarCliente,
 } from '../api/creditos'
+import { getClientes, crearCliente, actualizarCliente, desactivarCliente } from '../api/clientes'
 import { getProductos } from '../api/productos'
 import { getTasa } from '../api/tasa'
 import { createVenta } from '../api/ventas'
@@ -24,6 +27,7 @@ import { formatNumber } from './Ventas'
 import Paginador from './Paginador'
 import { usePaginacion } from '../hooks/usePaginacion'
 import { mensajeError } from '../utils/error'
+import { esVendible } from '../utils/productos'
 
 const money = (n, code) => {
   const val = formatNumber(n)
@@ -119,6 +123,7 @@ export default function Creditos() {
   const [cobroRecUsd, setCobroRecUsd] = useState('')
   const [abonoActivo, setAbonoActivo] = useState(false)
   const [abonoMonto, setAbonoMonto] = useState('')
+  const [cobroCliente, setCobroCliente] = useState(null)
   const [detailOpen, setDetailOpen] = useState(false)
   const [detailCuenta, setDetailCuenta] = useState(null)
   const [proximasVencer, setProximasVencer] = useState([])
@@ -147,25 +152,52 @@ export default function Creditos() {
   const [daysTerm, setDaysTerm] = useState(15)
   const [submitting, setSubmitting] = useState(false)
   const [tasa, setTasa] = useState(null)
+  const [highlightId, setHighlightId] = useState(null)
+
+  /* ── Directorio de clientes ── */
+  const [clientes, setClientes] = useState([])
+  const [clienteSel, setClienteSel] = useState(null)
+  const [clientesOpen, setClientesOpen] = useState(false)
+  const [clientesSearch, setClientesSearch] = useState('')
+  const [nuevoCliente, setNuevoCliente] = useState({ name: '', phone: '' })
+  const [guardandoCliente, setGuardandoCliente] = useState(false)
+  const [clienteEditar, setClienteEditar] = useState(null)
+
+  /* ── Vista agrupada por cliente ── */
+  const [vista, setVista] = useState('lista')
 
   const searchRef = useRef(null)
   const resultsRef = useRef(null)
 
+  const isWide = useMediaQuery('(min-width: 1000px)')
+
   /* ── Carga de datos ── */
   const loadData = async () => {
     try {
-      const [cuentasRes, resumenRes, proximasRes] = await Promise.all([
+      const [cuentasRes, resumenRes, proximasRes, clientesRes] = await Promise.all([
         getCuentasCredito(filtro ? { status: filtro } : {}),
         getResumenCredito(),
         getProximasVencer(3),
+        getClientes().catch(() => ({ data: [] })),
       ])
       setCuentas(cuentasRes.data)
       setResumen(resumenRes.data)
       setProximasVencer(proximasRes.data)
+      setClientes(clientesRes.data)
       const noNotificadas = proximasRes.data.filter(c => !c.notified)
       if (noNotificadas.length > 0) setNotifOpen(true)
     } catch {
       setSnack({ open: true, msg: 'Error al cargar datos de créditos', severity: 'error' })
+    }
+  }
+
+  const recargarClientes = async () => {
+    try {
+      const res = await getClientes()
+      setClientes(res.data)
+      return res.data
+    } catch {
+      return []
     }
   }
 
@@ -185,8 +217,7 @@ export default function Creditos() {
   const { page, rowsPerPage, total, actuales, handleChangePage, handleChangeRowsPerPage } = usePaginacion(cuentasFiltradas)
 
   /* ── Acciones de cuentas ── */
-  const openCobroDialog = async (c) => {
-    setCuentaSeleccionada(c)
+  const _resetCobro = () => {
     setCobroMetodo('Bolívares Efectivo')
     setCobroMixtoBs('Bolívares Efectivo')
     setCobroRef('')
@@ -195,6 +226,25 @@ export default function Creditos() {
     setAbonoActivo(false)
     setAbonoMonto('')
     setCobroTasa(null)
+  }
+
+  const openCobroDialog = async (c) => {
+    setCobroCliente(null)
+    setCuentaSeleccionada(c)
+    _resetCobro()
+    setConfirmOpen(true)
+    try {
+      const tasaRes = await getTasa()
+      setCobroTasa(tasaRes.data?.rate || null)
+    } catch {
+      setCobroTasa(null)
+    }
+  }
+
+  const openCobroCliente = async (cliente) => {
+    setCuentaSeleccionada(null)
+    setCobroCliente(cliente)
+    _resetCobro()
     setConfirmOpen(true)
     try {
       const tasaRes = await getTasa()
@@ -205,12 +255,15 @@ export default function Creditos() {
   }
 
   /* ── Derivados del diálogo de cobro ── */
-  const cobroSaldo = cuentaSeleccionada
-    ? (cuentaSeleccionada.saldo_usd ?? cuentaSeleccionada.total_usd ?? 0)
-    : 0
-  const cobroYaAbonado = cuentaSeleccionada
-    ? Math.max((cuentaSeleccionada.total_usd || 0) - cobroSaldo, 0)
-    : 0
+  // Cuentas involucradas: una sola (cobro por venta) o todas las pendientes
+  // del cliente (cobro consolidado).
+  const cobroCuentas = cobroCliente
+    ? cuentas.filter(c => c.cliente_id === cobroCliente.id && c.status === 'pendiente')
+    : (cuentaSeleccionada ? [cuentaSeleccionada] : [])
+  const cobroSaldo = cobroCuentas.reduce((s, c) => s + (c.saldo_usd ?? c.total_usd ?? 0), 0)
+  const cobroYaAbonado = cobroCuentas.reduce(
+    (s, c) => s + Math.max((c.total_usd || 0) - (c.saldo_usd ?? c.total_usd ?? 0), 0), 0
+  )
   const cobroEsMixto = cobroMetodo === 'Mixto'
   const cobroMetodoRef = cobroEsMixto ? cobroMixtoBs : cobroMetodo
   const cobroNecesitaRef = COBRO_METHODS_WITH_REFERENCE.includes(cobroMetodoRef)
@@ -223,13 +276,18 @@ export default function Creditos() {
   const cobroEsBs = !cobroEsMixto && cobroMoneda === 'BS'
   const abonoSolicitadoUsd = cobroEsBs && cobroTasa ? abonoSolicitado / cobroTasa : abonoSolicitado
   const montoAbonar = abonoActivo && abonoSolicitado > 0 ? Math.min(abonoSolicitadoUsd, cobroSaldo) : cobroSaldo
-  const cobroRecibeTotal = cobroEsMixto && cobroTasa ? cRecUsd + cRecBs / cobroTasa : 0
-  const cobroFaltaUsd = cobroEsMixto && cobroRecibeTotal > 0 ? Math.max(montoAbonar - cobroRecibeTotal, 0) : null
-  const cobroInsuficiente = cobroEsMixto && cobroRecibeTotal > 0 && cobroFaltaUsd > 0.005
+  // Monto recibido en USD según el método: simple (Bs o $) o mixto
+  const cobroRecibeUsd = cobroEsMixto
+    ? (cobroTasa ? cRecUsd + cRecBs / cobroTasa : 0)
+    : cobroEsBs
+      ? (cobroTasa ? cRecBs / cobroTasa : 0)
+      : cRecUsd
+  const cobroFaltaUsd = Math.max(montoAbonar - cobroRecibeUsd, 0)
+  const cobroInsuficiente = cobroRecibeUsd <= 0.005 || cobroFaltaUsd > 0.005
   const abonoExcede = abonoActivo && abonoSolicitado > 0 && abonoSolicitadoUsd > cobroSaldo + 0.005
 
   const handleRegistrarCobro = async () => {
-    if (!cuentaSeleccionada) return
+    if (!cuentaSeleccionada && !cobroCliente) return
     if (!cobroMetodo) {
       setSnack({ open: true, msg: 'Selecciona el método de pago con el que cancela el cliente', severity: 'error' })
       return
@@ -252,19 +310,40 @@ export default function Creditos() {
         payment_method: cobroEsMixto ? `Mixto ($ + ${cobroMixtoBs})` : cobroMetodo,
         reference: cobroNecesitaRef ? (cobroRef.trim() || null) : null,
         ...(abonoActivo && abonoSolicitado > 0 ? { monto_usd: abonoSolicitadoUsd } : {}),
-        ...(cobroEsMixto ? { received_usd: cRecUsd, received_bs: cRecBs } : {}),
+        ...(cobroRecibeUsd > 0
+          ? (cobroEsMixto
+              ? { received_usd: cRecUsd, received_bs: cRecBs }
+              : cobroEsBs
+                ? { received_bs: cRecBs }
+                : { received_usd: cRecUsd })
+          : {}),
       }
-      await registrarCobro(cuentaSeleccionada.id, payload)
       const completa = !abonoActivo || abonoSolicitadoUsd >= cobroSaldo - 0.005
-      setSnack({
-        open: true,
-        msg: completa
-          ? `Cuenta #${cuentaSeleccionada.id} pagada por completo`
-          : `Abono de ${money(montoAbonar, 'USD')} registrado · saldo ${money(Math.max(cobroSaldo - montoAbonar, 0), 'USD')}`,
-        severity: 'success',
-      })
+
+      if (cobroCliente) {
+        // Cobro consolidado: reparte FIFO entre las compras pendientes del cliente
+        const res = await pagarCliente(cobroCliente.id, payload)
+        const n = res.data?.aplicado?.length || 0
+        setSnack({
+          open: true,
+          msg: completa
+            ? `Cobrados los ${n} crédito(s) de ${cobroCliente.name} por completo`
+            : `Abono de ${money(montoAbonar, 'USD')} aplicado a ${cobroCliente.name} · saldo ${money(Math.max(cobroSaldo - montoAbonar, 0), 'USD')}`,
+          severity: 'success',
+        })
+        setCobroCliente(null)
+      } else {
+        await registrarCobro(cuentaSeleccionada.id, payload)
+        setSnack({
+          open: true,
+          msg: completa
+            ? `Cuenta #${cuentaSeleccionada.id} pagada por completo`
+            : `Abono de ${money(montoAbonar, 'USD')} registrado · saldo ${money(Math.max(cobroSaldo - montoAbonar, 0), 'USD')}`,
+          severity: 'success',
+        })
+        setCuentaSeleccionada(null)
+      }
       setConfirmOpen(false)
-      setCuentaSeleccionada(null)
       loadData()
     } catch (err) {
       setSnack({ open: true, msg: mensajeError(err, 'Error al registrar el cobro'), severity: 'error' })
@@ -366,6 +445,7 @@ export default function Creditos() {
     setCart([])
     setSearch('')
     setClientName('')
+    setClienteSel(null)
     setDaysTerm(15)
     setShowResults(false)
     setCreditDialogOpen(true)
@@ -375,6 +455,7 @@ export default function Creditos() {
   /* ── Lógica del carrito ── */
   const filtered = search.trim()
     ? productos.filter(p => {
+        if (!esVendible(p)) return false
         const q = search.toLowerCase()
         return p.name.toLowerCase().includes(q) || (p.barcode && p.barcode.toLowerCase().includes(q))
       })
@@ -394,6 +475,8 @@ export default function Creditos() {
         unitQty: esPeso ? 0 : 1, weightG: esPeso ? 1000 : 0, max_stock: producto.stock,
       }]
     })
+    setHighlightId(producto.id)
+    setTimeout(() => setHighlightId(null), 1600)
     setSearch('')
     setShowResults(false)
     setTimeout(() => searchRef.current?.focus(), 50)
@@ -446,7 +529,7 @@ export default function Creditos() {
     setSearch(val)
     setShowResults(val.trim().length > 0)
     if (val.trim()) {
-      const exactBarcode = productos.find(p => p.barcode && p.barcode.toLowerCase() === val.trim().toLowerCase())
+      const exactBarcode = productos.find(p => p.barcode && p.barcode.toLowerCase() === val.trim().toLowerCase() && esVendible(p))
       if (exactBarcode) addToCart(exactBarcode)
     }
   }
@@ -462,7 +545,7 @@ export default function Creditos() {
 
   const handleCreateCredit = async () => {
     if (cart.length === 0) { setSnack({ open: true, msg: 'Agrega al menos un producto', severity: 'error' }); return }
-    if (!clientName.trim()) { setSnack({ open: true, msg: 'El nombre del cliente es obligatorio', severity: 'error' }); return }
+    if (!clienteSel && !clientName.trim()) { setSnack({ open: true, msg: 'Selecciona o escribe el nombre del cliente', severity: 'error' }); return }
     if (!tasaActual) { setSnack({ open: true, msg: 'No se pudo obtener la tasa del BCV', severity: 'error' }); return }
     const pesoVacio = cart.find(c => c.sale_unit === 'peso' && (!c.weightG || c.weightG <= 0))
     if (pesoVacio) { setSnack({ open: true, msg: `Ingresa el peso en gramos para "${pesoVacio.name}"`, severity: 'error' }); return }
@@ -471,9 +554,10 @@ export default function Creditos() {
     setSubmitting(true)
     try {
       await createVenta({
-        payment_method: 'Crédito', client_name: clientName.trim(), reference: null,
+        payment_method: 'Crédito', client_name: (clienteSel?.name || clientName).trim(), reference: null,
         currency: 'USD', rate: tasaActual, received_bs: null, received_usd: null,
         change_bs: null, change_usd: null, is_credit: true, days_term: daysTerm,
+        ...(clienteSel ? { cliente_id: clienteSel.id } : {}),
         items: cart.map(c => c.sale_unit === 'peso'
           ? { product_id: c.product_id, quantity: Math.round(c.weightG || 0) }
           : { product_id: c.product_id, quantity: c.unitQty }),
@@ -484,6 +568,53 @@ export default function Creditos() {
     } catch (err) {
       setSnack({ open: true, msg: mensajeError(err, 'Error al registrar venta a crédito'), severity: 'error' })
     } finally { setSubmitting(false) }
+  }
+
+  /* ── Directorio de clientes ── */
+  const handleCrearCliente = async () => {
+    const nombre = nuevoCliente.name.trim()
+    if (!nombre) { setSnack({ open: true, msg: 'Ingresa el nombre del cliente', severity: 'error' }); return }
+    setGuardandoCliente(true)
+    try {
+      const res = await crearCliente({ name: nombre, phone: nuevoCliente.phone.trim() || null })
+      const lista = await recargarClientes()
+      const creado = lista.find(c => c.id === res.data.id) || res.data
+      setNuevoCliente({ name: '', phone: '' })
+      setSnack({ open: true, msg: `Cliente "${creado.name}" agregado`, severity: 'success' })
+      return creado
+    } catch (err) {
+      setSnack({ open: true, msg: mensajeError(err, 'Error al crear el cliente'), severity: 'error' })
+    } finally { setGuardandoCliente(false) }
+  }
+
+  const handleDesactivarCliente = async (cliente) => {
+    try {
+      await desactivarCliente(cliente.id)
+      await recargarClientes()
+      if (clienteSel?.id === cliente.id) setClienteSel(null)
+      setSnack({ open: true, msg: `Cliente "${cliente.name}" desactivado`, severity: 'success' })
+    } catch (err) {
+      setSnack({ open: true, msg: mensajeError(err, 'Error al desactivar el cliente'), severity: 'error' })
+    }
+  }
+
+  const handleGuardarEdicionCliente = async () => {
+    if (!clienteEditar) return
+    const nombre = (clienteEditar.name || '').trim()
+    if (!nombre) { setSnack({ open: true, msg: 'Ingresa el nombre del cliente', severity: 'error' }); return }
+    try {
+      await actualizarCliente(clienteEditar.id, {
+        name: nombre,
+        phone: (clienteEditar.phone || '').trim() || null,
+      })
+      await recargarClientes()
+      if (clienteSel?.id === clienteEditar.id) setClienteSel({ ...clienteSel, name: nombre })
+      setClienteEditar(null)
+      loadData()
+      setSnack({ open: true, msg: 'Cliente actualizado', severity: 'success' })
+    } catch (err) {
+      setSnack({ open: true, msg: mensajeError(err, 'Error al actualizar el cliente'), severity: 'error' })
+    }
   }
 
   const fechaVencimiento = (() => {
@@ -633,7 +764,35 @@ export default function Creditos() {
           }}
           slotProps={{ input: { startAdornment: <Search sx={{ color: '#C9952A', mr: 1, fontSize: 20 }} aria-hidden="true" />, 'aria-label': 'Buscar cuentas por cobrar' } }}
         />
+        <ToggleButtonGroup
+          value={vista}
+          exclusive
+          size="small"
+          onChange={(_, v) => { if (v) setVista(v) }}
+          aria-label="Cambiar vista de créditos"
+          sx={{
+            bgcolor: '#FFF8F0', borderRadius: 2,
+            '& .MuiToggleButton-root': {
+              px: 1.5, textTransform: 'none', color: '#6B5344', borderColor: 'rgba(201, 149, 42, 0.25)',
+              '&.Mui-selected': { bgcolor: 'rgba(45, 90, 30, 0.12)', color: '#2D5A1E', fontWeight: 700 },
+            },
+          }}
+        >
+          <ToggleButton value="lista" aria-label="Vista por venta"><ViewList fontSize="small" sx={{ mr: 0.5 }} />Por venta</ToggleButton>
+          <ToggleButton value="clientes" aria-label="Vista por cliente"><Group fontSize="small" sx={{ mr: 0.5 }} />Por cliente</ToggleButton>
+        </ToggleButtonGroup>
       </Box>
+
+      {vista === 'clientes' ? (
+        <ClientesCreditosView
+          clientes={clientes}
+          cuentas={cuentas}
+          busqueda={busqueda}
+          onCobrar={openCobroCliente}
+          onGestionar={() => setClientesOpen(true)}
+        />
+      ) : (
+      <>
 
       {/* ── Tabla de cuentas por cobrar ── */}
       <TableContainer
@@ -761,6 +920,8 @@ export default function Creditos() {
         </Table>
         <Paginador page={page} rowsPerPage={rowsPerPage} total={total} onPageChange={handleChangePage} onRowsPerPageChange={handleChangeRowsPerPage} />
       </TableContainer>
+      </>
+      )}
 
       {/* ══════════════════════════════════════════════════
           DIALOG: Nueva Venta a Crédito
@@ -768,19 +929,31 @@ export default function Creditos() {
       <Dialog
         open={creditDialogOpen}
         onClose={() => setCreditDialogOpen(false)}
-        maxWidth="md" fullWidth
+        maxWidth="lg" fullWidth
+        fullScreen={!isWide}
         slots={{ transition: Slide }}
         slotProps={{
-          paper: { sx: { borderRadius: 3, overflow: 'hidden', minHeight: 500 } },
+          paper: { sx: { borderRadius: isWide ? 3 : 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', height: isWide ? 'min(96dvh, 960px)' : '100%' } },
           transition: { direction: 'up' },
         }}
         aria-labelledby="credit-dialog-title"
       >
-        <DialogTitle id="credit-dialog-title" sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', bgcolor: '#2D5A1E', color: '#FFF8F0', py: 2, px: 3 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+        <DialogTitle id="credit-dialog-title" sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', bgcolor: '#2D5A1E', color: '#FFF8F0', py: 2, px: 3, gap: 1.5 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 0 }}>
             <CreditCard sx={{ fontSize: 22 }} aria-hidden="true" />
             <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 600, fontSize: '1.15rem' }}>
               Nueva Venta a Crédito
+            </Typography>
+          </Box>
+          <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 1, minWidth: 0 }}>
+            <Typography sx={{ color: 'rgba(255, 248, 240, 0.6)', fontSize: '0.65rem', textTransform: 'uppercase', letterSpacing: '0.06em', display: { xs: 'none', sm: 'inline' } }}>
+              Total a cobrar
+            </Typography>
+            <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 700, fontSize: '1.3rem', whiteSpace: 'nowrap', lineHeight: 1.2 }}>
+              {money(totalCobrar, 'USD')}
+            </Typography>
+            <Typography sx={{ color: 'rgba(255, 248, 240, 0.75)', fontSize: '0.7rem', whiteSpace: 'nowrap', display: { xs: 'none', md: 'inline' } }}>
+              (≈ Bs. {formatNumber(totalUSD * tasaActual)} · tasa {tasaActual ? `Bs. ${tasaActual}` : 's/tasa'})
             </Typography>
           </Box>
           <IconButton onClick={() => setCreditDialogOpen(false)} size="small" aria-label="Cerrar formulario" sx={{ color: 'rgba(255, 248, 240, 0.6)', '&:hover': { color: '#FFF8F0', bgcolor: 'rgba(255,248,240,0.1)' } }}>
@@ -788,9 +961,13 @@ export default function Creditos() {
           </IconButton>
         </DialogTitle>
 
-        <DialogContent sx={{ p: 0, display: 'flex', flexDirection: 'column', height: '100%' }}>
+        <DialogContent sx={{ p: 0, display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          {/* Fila principal: carrito (izq) + panel (der) */}
+          <Box sx={{ display: 'flex', flexDirection: isWide ? 'row' : 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          {/* Columna izquierda: buscador + carrito */}
+          <Box sx={{ display: 'flex', flexDirection: 'column', flex: isWide ? '1.7 1 0' : '1 1 auto', minWidth: 0, minHeight: 0 }}>
           {/* Buscador de productos */}
-          <Box sx={{ position: 'relative', px: 3, pt: 3, pb: 0 }}>
+          <Box sx={{ position: 'relative', px: 3, pt: 2.5, pb: 0, flexShrink: 0 }}>
             <TextField
               inputRef={searchRef}
               placeholder="Buscar producto por nombre o código de barras..."
@@ -839,35 +1016,8 @@ export default function Creditos() {
             )}
           </Box>
 
-          {/* Cliente, Plazo y Moneda */}
-          <Box sx={{ px: 3, pt: 2 }}>
-            <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-              <TextField
-                label="Nombre del cliente *"
-                value={clientName}
-                onChange={e => setClientName(e.target.value)}
-                size="small" required
-                placeholder="Obligatorio para crédito"
-                slotProps={{ htmlInput: { 'aria-required': 'true' } }}
-                sx={{ flex: 1, minWidth: 180, '& .MuiOutlinedInput-root': { borderRadius: 2, bgcolor: '#F8F5F0', '& fieldset': { borderColor: 'rgba(45, 90, 30, 0.3)' }, '&:hover fieldset': { borderColor: '#2D5A1E' }, '&.Mui-focused fieldset': { borderColor: '#2D5A1E' } } }}
-              />
-              <FormControl size="small" sx={{ minWidth: 130 }}>
-                <InputLabel id="plazo-pago-label" sx={{ color: '#6B5344' }}>Plazo de pago</InputLabel>
-                <Select labelId="plazo-pago-label" value={daysTerm} label="Plazo de pago" onChange={e => setDaysTerm(e.target.value)}
-                  slotProps={{ select: { 'aria-label': 'Plazo de pago en días' } }}
-                  sx={{ borderRadius: 2, bgcolor: '#F8F5F0', '& fieldset': { borderColor: 'rgba(45, 90, 30, 0.3)' }, '&:hover fieldset': { borderColor: '#2D5A1E' }, '&.Mui-focused fieldset': { borderColor: '#2D5A1E' } }}>
-                  {TERM_OPTIONS.map(opt => (
-                    <MenuItem key={opt.value} value={opt.value}><CalendarMonth sx={{ fontSize: 18, mr: 1, color: '#2D5A1E' }} aria-hidden="true" />{opt.label}</MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-            </Box>
-          </Box>
-
-          <Divider sx={{ mx: 3, my: 2 }} />
-
           {/* Carrito */}
-          <Box sx={{ flex: 1, px: 3, overflow: 'auto', minHeight: 180 }}>
+          <Box sx={{ flex: 1, minHeight: 0, px: 3, pb: 1, overflow: 'auto' }}>
             {cart.length === 0 ? (
               <Box sx={{ textAlign: 'center', py: 4 }}>
                 <ShoppingCart sx={{ fontSize: 48, color: '#A5C49B', mb: 1, opacity: 0.4 }} aria-hidden="true" />
@@ -876,9 +1026,10 @@ export default function Creditos() {
               </Box>
             ) : (
               <>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, position: 'sticky', top: 0, zIndex: 1, bgcolor: '#FFF8F0' }}>
                   <Receipt sx={{ fontSize: 18, color: '#6B5344', opacity: 0.5 }} aria-hidden="true" />
                   <Typography sx={{ fontWeight: 600, color: '#2C1810', fontSize: '0.85rem' }}>Carrito ({itemsCount} item{itemsCount !== 1 ? 's' : ''})</Typography>
+                  <Typography sx={{ fontSize: '0.7rem', color: '#6B5344', opacity: 0.6, ml: 'auto' }}>Último agregado arriba</Typography>
                 </Box>
                 <Table size="small" aria-label="Productos en el carrito">
                   <TableHead>
@@ -891,8 +1042,14 @@ export default function Creditos() {
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {cart.map((c, i) => (
-                      <TableRow key={c.product_id} sx={{ animation: `fade-in-up 0.2s ease-out ${i * 0.03}s both`, '&:hover': { bgcolor: 'rgba(45, 90, 30, 0.03)' } }}>
+                    {[...cart].reverse().map((c) => (
+                      <TableRow key={c.product_id} sx={{
+                        animation: 'row-enter 0.28s ease-out both',
+                        bgcolor: c.product_id === highlightId ? 'rgba(45, 90, 30, 0.12)' : 'transparent',
+                        boxShadow: c.product_id === highlightId ? 'inset 3px 0 0 #2D5A1E' : 'none',
+                        transition: 'background 0.3s ease',
+                        '&:hover': { bgcolor: 'rgba(45, 90, 30, 0.03)' },
+                      }}>
                         <TableCell>
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                             <Typography sx={{ fontWeight: 500, fontSize: '0.85rem', color: '#2C1810' }}>{c.name}</Typography>
@@ -938,36 +1095,112 @@ export default function Creditos() {
             )}
           </Box>
 
-          {/* Footer: Info + Total + Acciones */}
-          <Box sx={{ borderTop: '1px solid rgba(45, 90, 30, 0.1)', bgcolor: '#F0F7EC', px: 3, py: 2 }}>
-            <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 2 }}>
-              <Box sx={{ flex: 1, minWidth: 200 }}>
-                <Alert severity="info" sx={{ borderRadius: 2, bgcolor: 'rgba(45, 90, 30, 0.06)', border: '1px solid rgba(45, 90, 30, 0.2)' }}>
-                  <Typography sx={{ fontWeight: 600, fontSize: '0.85rem', color: '#2D5A1E' }}>Venta a Crédito</Typography>
-                  <Typography variant="body2" sx={{ color: '#6B5344', mt: 0.5 }}>El cliente pagará después. Se reflejará en ventas diarias y cuentas por cobrar.</Typography>
-                </Alert>
-                <Box sx={{ mt: 1.5, p: 1.5, borderRadius: 2, bgcolor: 'rgba(45, 90, 30, 0.04)', border: '1px dashed rgba(45, 90, 30, 0.2)' }}>
-                  <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}><strong>Cliente:</strong> {clientName || '—'}</Typography>
-                  <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}><strong>Deuda:</strong> en dólares ($), el método de pago se elige al cobrar</Typography>
-                  <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}><strong>Plazo:</strong> {daysTerm} días (vence: {fechaVencimiento})</Typography>
-                  <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}><strong>Saldo:</strong> {money(totalCobrar, 'USD')}</Typography>
-                </Box>
+          </Box>
+          {/* fin columna izquierda */}
+
+          {/* Columna derecha: cliente, plazo y resumen */}
+          <Box sx={{
+            display: 'flex', flexDirection: 'column',
+            flex: isWide ? '1 1 0' : '0 0 auto',
+            minWidth: isWide ? 320 : 0, minHeight: 0,
+            borderLeft: isWide ? '1px solid rgba(45, 90, 30, 0.15)' : 'none',
+            borderTop: isWide ? 'none' : '1px solid rgba(45, 90, 30, 0.15)',
+            bgcolor: '#F0F7EC',
+            overflowY: 'auto',
+            maxHeight: isWide ? 'none' : '46vh',
+          }}>
+            {/* Cliente y Plazo */}
+            <Box sx={{ px: 2.5, pt: 2, pb: 0, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start' }}>
+                <Autocomplete
+                  freeSolo
+                  size="small"
+                  fullWidth
+                  options={clientes}
+                  getOptionLabel={(o) => (typeof o === 'string' ? o : o.name || '')}
+                  value={clienteSel}
+                  inputValue={clientName}
+                  onInputChange={(_, val, reason) => { if (reason === 'input' || reason === 'reset') setClientName(val || '') }}
+                  onChange={(_, val) => {
+                    if (val && typeof val === 'object') { setClienteSel(val); setClientName(val.name) }
+                    else { setClienteSel(null); setClientName(val || '') }
+                  }}
+                  noOptionsText="Sin coincidencias: se creará un cliente nuevo"
+                  renderInput={(params) => (
+                    <TextField
+                      {...params}
+                      label="Cliente *"
+                      required
+                      placeholder="Selecciona o escribe un cliente"
+                      slotProps={{
+                        ...params.slotProps,
+                        htmlInput: { ...params.slotProps?.htmlInput, 'aria-required': 'true' },
+                      }}
+                      sx={{ '& .MuiOutlinedInput-root': { borderRadius: 2, bgcolor: '#FFF8F0', '& fieldset': { borderColor: 'rgba(45, 90, 30, 0.3)' }, '&:hover fieldset': { borderColor: '#2D5A1E' }, '&.Mui-focused fieldset': { borderColor: '#2D5A1E' } } }}
+                    />
+                  )}
+                />
+                <Tooltip title="Directorio de clientes">
+                  <IconButton onClick={() => setClientesOpen(true)} aria-label="Abrir directorio de clientes"
+                    sx={{ border: '1px solid rgba(45, 90, 30, 0.3)', borderRadius: 2, color: '#2D5A1E', bgcolor: '#FFF8F0' }}>
+                    <People fontSize="small" />
+                  </IconButton>
+                </Tooltip>
               </Box>
-              <Box sx={{ textAlign: 'right', minWidth: 160 }}>
+              {clienteSel && (
+                <Typography sx={{ fontSize: '0.7rem', color: '#2D5A1E', fontWeight: 600, mt: -0.5 }}>
+                  Cliente del directorio: {cuentas.filter(c => c.cliente_id === clienteSel.id && c.status === 'pendiente').length} crédito(s) pendiente(s)
+                </Typography>
+              )}
+              <FormControl size="small" fullWidth>
+                <InputLabel id="plazo-pago-label" sx={{ color: '#6B5344' }}>Plazo de pago</InputLabel>
+                <Select labelId="plazo-pago-label" value={daysTerm} label="Plazo de pago" onChange={e => setDaysTerm(e.target.value)}
+                  slotProps={{ select: { 'aria-label': 'Plazo de pago en días' } }}
+                  sx={{ borderRadius: 2, bgcolor: '#FFF8F0', '& fieldset': { borderColor: 'rgba(45, 90, 30, 0.3)' }, '&:hover fieldset': { borderColor: '#2D5A1E' }, '&.Mui-focused fieldset': { borderColor: '#2D5A1E' } }}>
+                  {TERM_OPTIONS.map(opt => (
+                    <MenuItem key={opt.value} value={opt.value}><CalendarMonth sx={{ fontSize: 18, mr: 1, color: '#2D5A1E' }} aria-hidden="true" />{opt.label}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Box>
+
+            <Divider sx={{ mx: 2.5, my: 1 }} />
+
+            {/* Resumen */}
+            <Box sx={{ px: 2.5, flexShrink: 0 }}>
+              <Alert severity="info" sx={{ borderRadius: 2, bgcolor: 'rgba(45, 90, 30, 0.06)', border: '1px solid rgba(45, 90, 30, 0.2)', py: 0.75 }}>
+                <Typography sx={{ fontWeight: 600, fontSize: '0.85rem', color: '#2D5A1E' }}>Venta a Crédito</Typography>
+                <Typography variant="body2" sx={{ color: '#6B5344', mt: 0.25, fontSize: '0.72rem' }}>El cliente pagará después. Se reflejará en ventas diarias y cuentas por cobrar.</Typography>
+              </Alert>
+              <Box sx={{ mt: 1.5, p: 1.5, borderRadius: 2, bgcolor: 'rgba(45, 90, 30, 0.04)', border: '1px dashed rgba(45, 90, 30, 0.2)' }}>
+                <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}><strong>Cliente:</strong> {clientName || '—'}</Typography>
+                <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}><strong>Deuda:</strong> en dólares ($), el método de pago se elige al cobrar</Typography>
+                <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}><strong>Plazo:</strong> {daysTerm} días (vence: {fechaVencimiento})</Typography>
+                <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}><strong>Saldo:</strong> {money(totalCobrar, 'USD')}</Typography>
+              </Box>
+            </Box>
+
+            {/* Total */}
+            <Box sx={{ px: 2.5, pb: 2, pt: 1, mt: 'auto' }}>
+              <Box sx={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 2 }}>
                 <Typography variant="caption" sx={{ color: '#6B5344', textTransform: 'uppercase', letterSpacing: '0.08em', fontSize: '0.65rem' }}>Total a cobrar</Typography>
-                <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 700, color: totalUSD > 0 ? '#2D5A1E' : '#6B5344', fontSize: '1.5rem', lineHeight: 1.2, whiteSpace: 'nowrap' }}>{money(totalCobrar, 'USD')}</Typography>
-                <Typography sx={{ fontSize: '0.72rem', color: '#6B5344' }}>(≈ Bs. {formatNumber(totalUSD * tasaActual)} · tasa {tasaActual ? `Bs. ${tasaActual}` : 's/tasa'})</Typography>
+                <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 700, color: totalUSD > 0 ? '#2D5A1E' : '#6B5344', fontSize: '1.4rem', lineHeight: 1.2, whiteSpace: 'nowrap' }}>{money(totalCobrar, 'USD')}</Typography>
               </Box>
+              <Typography sx={{ fontSize: '0.72rem', color: '#6B5344', textAlign: 'right' }}>(≈ Bs. {formatNumber(totalUSD * tasaActual)} · tasa {tasaActual ? `Bs. ${tasaActual}` : 's/tasa'})</Typography>
             </Box>
-            <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1.5, mt: 2 }}>
-              <Button onClick={() => setCreditDialogOpen(false)} sx={{ color: '#6B5344', fontWeight: 500, borderRadius: 2, px: 3, '&:hover': { bgcolor: 'rgba(107,83,68,0.08)' } }}>Cancelar</Button>
-              <Button variant="contained" onClick={handleCreateCredit}
-                disabled={cart.length === 0 || submitting || !tasaActual || !clientName.trim()}
-                aria-label={`Registrar venta a crédito por ${money(totalCobrar, 'USD')}`}
-                sx={{ background: 'linear-gradient(135deg, #2D5A1E 0%, #1E3D14 100%)', '&:hover': { background: 'linear-gradient(135deg, #3A7028 0%, #2D5A1E 100%)', transform: 'translateY(-1px)' }, px: 4, py: 1.2, borderRadius: 2, fontWeight: 600, fontSize: '0.95rem', boxShadow: '0 4px 14px rgba(45, 90, 30, 0.3)', transition: 'all 0.2s ease', '&.Mui-disabled': { background: 'rgba(45, 90, 30, 0.3)', color: 'rgba(255, 248, 240, 0.5)' } }}>
-                {submitting ? 'Registrando...' : `Registrar Crédito ${money(totalCobrar, 'USD')}`}
-              </Button>
-            </Box>
+          </Box>
+          {/* fin columna derecha */}
+          </Box>
+          {/* fin fila principal */}
+
+          {/* Footer: solo registrar */}
+          <Box sx={{ flexShrink: 0, px: 2.5, py: 1.2, borderTop: '1px solid rgba(45, 90, 30, 0.15)', bgcolor: '#F0F7EC', display: 'flex', justifyContent: 'flex-end' }}>
+            <Button variant="contained" onClick={handleCreateCredit}
+              disabled={cart.length === 0 || submitting || !tasaActual || !clientName.trim()}
+              aria-label={`Registrar venta a crédito por ${money(totalCobrar, 'USD')}`}
+              sx={{ width: { xs: '100%', md: 'auto' }, background: 'linear-gradient(135deg, #2D5A1E 0%, #1E3D14 100%)', '&:hover': { background: 'linear-gradient(135deg, #3A7028 0%, #2D5A1E 100%)', transform: 'translateY(-1px)' }, px: 4, py: 1.2, borderRadius: 2, fontWeight: 600, fontSize: '0.95rem', boxShadow: '0 4px 14px rgba(45, 90, 30, 0.3)', transition: 'all 0.2s ease', '&.Mui-disabled': { background: 'rgba(45, 90, 30, 0.3)', color: 'rgba(255, 248, 240, 0.5)' } }}>
+              {submitting ? 'Registrando...' : `Registrar Crédito ${money(totalCobrar, 'USD')}`}
+            </Button>
           </Box>
         </DialogContent>
       </Dialog>
@@ -977,25 +1210,45 @@ export default function Creditos() {
           ══════════════════════════════════════════════════ */}
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)} slotProps={{ paper: { sx: { borderRadius: 3, minWidth: 420 } } }} aria-labelledby="confirm-cobro-title">
         <DialogTitle id="confirm-cobro-title" sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', bgcolor: '#2D5A1E', color: '#FFF8F0', py: 2, px: 3 }}>
-          <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 600 }}>Registrar Cobro</Typography>
+          <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 600 }}>{cobroCliente ? `Cobro consolidado · ${cobroCliente.name}` : 'Registrar Cobro'}</Typography>
           <IconButton onClick={() => setConfirmOpen(false)} aria-label="Cerrar" sx={{ color: 'rgba(255,248,240,0.6)' }}><Close fontSize="small" /></IconButton>
         </DialogTitle>
         <DialogContent sx={{ pt: 3 }}>
-          {cuentaSeleccionada && (
+          {(cuentaSeleccionada || cobroCliente) && (
             <Box>
               {/* Resumen de la deuda */}
-              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', p: 2, borderRadius: 2, bgcolor: 'rgba(45, 90, 30, 0.04)', border: '1px solid rgba(45, 90, 30, 0.15)', mb: 2 }}>
-                <Box>
-                  <Typography variant="body2" sx={{ color: '#6B5344' }}><strong>Cliente:</strong> {cuentaSeleccionada.client_name}</Typography>
-                  <Typography variant="body2" sx={{ color: '#6B5344' }}>Venta #{cuentaSeleccionada.sale_id}{cuentaSeleccionada.due_date ? ` · Vence ${formatFechaCorta(cuentaSeleccionada.due_date)}` : ''}</Typography>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 2, p: 2, borderRadius: 2, bgcolor: 'rgba(45, 90, 30, 0.04)', border: '1px solid rgba(45, 90, 30, 0.15)', mb: 2 }}>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Typography variant="body2" sx={{ color: '#6B5344' }}><strong>Cliente:</strong> {cobroCliente ? cobroCliente.name : cuentaSeleccionada.client_name}</Typography>
+                  {cobroCliente ? (
+                    <>
+                      <Typography variant="body2" sx={{ color: '#6B5344' }}>
+                        {cobroCuentas.length} compra(s) a crédito pendiente(s)
+                      </Typography>
+                      <Box sx={{ mt: 0.5, display: 'grid', gap: 0.25 }}>
+                        {cobroCuentas.map(c => (
+                          <Typography key={c.id} variant="caption" sx={{ color: '#6B5344', display: 'flex', justifyContent: 'space-between', gap: 1 }}>
+                            <span>
+                              Venta #{c.sale_id}
+                              {c.created_at ? ` · ${formatFechaCorta(c.created_at)}` : ''}
+                              {c.due_date ? ` · vence ${formatFechaCorta(c.due_date)}` : ''}
+                            </span>
+                            <strong>{money(c.saldo_usd ?? c.total_usd, 'USD')}</strong>
+                          </Typography>
+                        ))}
+                      </Box>
+                    </>
+                  ) : (
+                    <Typography variant="body2" sx={{ color: '#6B5344' }}>Venta #{cuentaSeleccionada.sale_id}{cuentaSeleccionada.due_date ? ` · Vence ${formatFechaCorta(cuentaSeleccionada.due_date)}` : ''}</Typography>
+                  )}
                   {cobroYaAbonado > 0.005 && (
-                    <Typography variant="body2" sx={{ color: '#B8860B', fontWeight: 600 }}>
-                      Ya abonado: {money(cobroYaAbonado, 'USD')} ({cuentaSeleccionada.pagos?.length || 0} pago{cuentaSeleccionada.pagos?.length === 1 ? '' : 's'})
+                    <Typography variant="body2" sx={{ color: '#B8860B', fontWeight: 600, mt: 0.5 }}>
+                      Ya abonado: {money(cobroYaAbonado, 'USD')}
                     </Typography>
                   )}
                 </Box>
                 <Box sx={{ textAlign: 'right' }}>
-                  <Typography variant="caption" sx={{ color: '#6B5344', textTransform: 'uppercase', fontSize: '0.6rem', letterSpacing: '0.06em' }}>Saldo a cobrar</Typography>
+                  <Typography variant="caption" sx={{ color: '#6B5344', textTransform: 'uppercase', fontSize: '0.6rem', letterSpacing: '0.06em' }}>{cobroCliente ? 'Total a cobrar' : 'Saldo a cobrar'}</Typography>
                   <Typography sx={{ fontWeight: 700, color: '#2D5A1E', fontSize: '1.35rem', whiteSpace: 'nowrap' }}>{money(cobroSaldo, 'USD')}</Typography>
                   <Typography variant="caption" sx={{ color: '#6B5344' }}>
                     ≈ Bs. {formatNumber(cobroSaldo * (cobroTasa || 0))} · tasa del día
@@ -1025,6 +1278,18 @@ export default function Creditos() {
                 </Select>
               </FormControl>
 
+              {/* Simple: monto pagado en la moneda del método */}
+              {!cobroEsMixto && (
+                <TextField
+                  label={cobroEsBs ? 'Monto pagado (Bs)' : 'Monto pagado ($)'}
+                  size="small" type="number" fullWidth
+                  value={cobroEsBs ? cobroRecBs : cobroRecUsd}
+                  onChange={e => cobroEsBs ? setCobroRecBs(e.target.value) : setCobroRecUsd(e.target.value)}
+                  slotProps={{ htmlInput: { min: 0, step: 0.01 } }}
+                  sx={{ mb: 1.5, '& .MuiOutlinedInput-root': { borderRadius: 2, bgcolor: '#FFF8F0' } }}
+                />
+              )}
+
               {/* Mixto: método en Bs y montos entregados */}
               {cobroEsMixto && (
                 <Box sx={{ mb: 1.5, display: 'grid', gap: 1.5 }}>
@@ -1043,24 +1308,28 @@ export default function Creditos() {
                   </FormControl>
                   <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1.5 }}>
                     <TextField
-                      label="Recibe ($USD)" size="small" type="number"
+                      label="Monto pagado ($)" size="small" type="number"
                       value={cobroRecUsd} onChange={e => setCobroRecUsd(e.target.value)}
                       slotProps={{ htmlInput: { min: 0, step: 0.01 } }}
                     />
                     <TextField
-                      label={`Recibe (Bs)${cobroTasa ? ` · tasa ${cobroTasa}` : ''}`} size="small" type="number"
+                      label={`Monto pagado (Bs)${cobroTasa ? ` · tasa ${cobroTasa}` : ''}`} size="small" type="number"
                       value={cobroRecBs} onChange={e => setCobroRecBs(e.target.value)}
                       slotProps={{ htmlInput: { min: 0, step: 0.01 } }}
                     />
                   </Box>
-                  {cobroRecibeTotal > 0 && (
-                    <Typography sx={{ fontSize: '0.8rem', fontWeight: 600, color: cobroInsuficiente ? '#C62828' : '#2D5A1E' }}>
-                      {cobroInsuficiente
-                        ? `Faltan ${money(cobroFaltaUsd * cobroTasa, 'BS')} (${money(cobroFaltaUsd, 'USD')})`
-                        : `Cubre ${money(Math.min(cobroRecibeTotal, montoAbonar), 'USD')}${cobroRecibeTotal > montoAbonar + 0.005 ? ` · sobra ${money(cobroRecibeTotal - montoAbonar, 'USD')}` : ''}`}
-                    </Typography>
-                  )}
                 </Box>
+              )}
+
+              {/* Estado del monto recibido (simple o mixto) */}
+              {cobroRecibeUsd > 0 && (
+                <Typography sx={{ fontSize: '0.8rem', fontWeight: 600, mb: 1.5, color: cobroInsuficiente ? '#C62828' : '#2D5A1E' }}>
+                  {cobroInsuficiente
+                    ? (cobroTasa
+                        ? `Faltan ${money(cobroFaltaUsd, 'USD')} (${money(cobroFaltaUsd * cobroTasa, 'BS')})`
+                        : `Faltan ${money(cobroFaltaUsd, 'USD')}`)
+                    : `Cubre ${money(Math.min(cobroRecibeUsd, montoAbonar), 'USD')}${cobroRecibeUsd > montoAbonar + 0.005 ? ` · sobra ${money(cobroRecibeUsd - montoAbonar, 'USD')}` : ''}`}
+                </Typography>
               )}
 
               {/* Referencia bancaria */}
@@ -1366,11 +1635,174 @@ export default function Creditos() {
         </DialogActions>
       </Dialog>
 
+      {/* ══════════════════════════════════════════════════
+          DIALOG: Directorio de Clientes
+          ══════════════════════════════════════════════════ */}
+      <Dialog
+        open={clientesOpen}
+        onClose={() => setClientesOpen(false)}
+        maxWidth="sm" fullWidth
+        slots={{ transition: Slide }}
+        slotProps={{ paper: { sx: { borderRadius: 3, overflow: 'hidden' } }, transition: { direction: 'up' } }}
+        aria-labelledby="clientes-dialog-title"
+      >
+        <DialogTitle id="clientes-dialog-title" sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', bgcolor: '#2D5A1E', color: '#FFF8F0', py: 1.5, px: 2.5 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+            <People aria-hidden="true" />
+            <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 600, fontSize: '1.1rem' }}>Directorio de Clientes</Typography>
+          </Box>
+          <IconButton onClick={() => setClientesOpen(false)} size="small" aria-label="Cerrar directorio" sx={{ color: 'rgba(255,248,240,0.7)', '&:hover': { color: '#FFF8F0' } }}>
+            <Close fontSize="small" />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent sx={{ pt: 2.5, bgcolor: '#FFFDF8' }}>
+          <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' }}>
+            <TextField
+              label="Nombre" size="small" required value={nuevoCliente.name}
+              onChange={e => setNuevoCliente(c => ({ ...c, name: e.target.value }))}
+              onKeyDown={e => { if (e.key === 'Enter') handleCrearCliente() }}
+              sx={{ flex: '1 1 160px', '& .MuiOutlinedInput-root': { borderRadius: 2, bgcolor: '#FFF8F0' } }}
+            />
+            <TextField
+              label="Teléfono (opcional)" size="small" value={nuevoCliente.phone}
+              onChange={e => setNuevoCliente(c => ({ ...c, phone: e.target.value }))}
+              onKeyDown={e => { if (e.key === 'Enter') handleCrearCliente() }}
+              sx={{ flex: '1 1 140px', '& .MuiOutlinedInput-root': { borderRadius: 2, bgcolor: '#FFF8F0' } }}
+            />
+            <Button variant="contained" onClick={handleCrearCliente} disabled={guardandoCliente}
+              startIcon={<PersonAdd />}
+              sx={{ bgcolor: '#C9952A', borderRadius: 2, fontWeight: 600, '&:hover': { bgcolor: '#A87C1F' } }}>
+              Agregar
+            </Button>
+          </Box>
+          <TextField
+            value={clientesSearch}
+            onChange={e => setClientesSearch(e.target.value)}
+            placeholder="Buscar cliente..."
+            size="small" fullWidth sx={{ mb: 1.5 }}
+            slotProps={{ input: { startAdornment: <Search sx={{ color: '#C9952A', mr: 1, fontSize: 20 }} aria-hidden="true" />, 'aria-label': 'Buscar en el directorio' } }}
+          />
+          <Box sx={{ maxHeight: 340, overflowY: 'auto', border: '1px solid rgba(201, 149, 42, 0.15)', borderRadius: 2 }}>
+            {(() => {
+              const q = clientesSearch.trim().toLowerCase()
+              const lista = clientes.filter(c =>
+                !q || c.name.toLowerCase().includes(q) || (c.phone || '').includes(q))
+              if (lista.length === 0) {
+                return <Typography sx={{ p: 2, color: '#6B5344', fontSize: '0.85rem', textAlign: 'center' }}>Sin clientes registrados.</Typography>
+              }
+              return lista.map(c => (
+                <Box key={c.id} sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 1.5, py: 1, borderBottom: '1px solid rgba(201, 149, 42, 0.1)' }}>
+                  {clienteEditar?.id === c.id ? (
+                    <>
+                      <TextField size="small" value={clienteEditar.name} autoFocus
+                        onChange={e => setClienteEditar(cl => ({ ...cl, name: e.target.value }))}
+                        sx={{ flex: 1, '& .MuiOutlinedInput-root': { borderRadius: 2, bgcolor: '#FFF8F0' } }} />
+                      <TextField size="small" placeholder="Teléfono" value={clienteEditar.phone || ''}
+                        onChange={e => setClienteEditar(cl => ({ ...cl, phone: e.target.value }))}
+                        sx={{ width: 130, '& .MuiOutlinedInput-root': { borderRadius: 2, bgcolor: '#FFF8F0' } }} />
+                      <Button size="small" variant="contained" onClick={handleGuardarEdicionCliente}
+                        sx={{ bgcolor: '#2D5A1E', borderRadius: 2, '&:hover': { bgcolor: '#1E3D14' } }}>Guardar</Button>
+                      <IconButton size="small" onClick={() => setClienteEditar(null)} aria-label="Cancelar edición"><Close fontSize="small" /></IconButton>
+                    </>
+                  ) : (
+                    <>
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        <Typography sx={{ color: '#2C1810', fontWeight: 600, fontSize: '0.9rem' }}>{c.name}</Typography>
+                        <Typography sx={{ color: '#6B5344', fontSize: '0.72rem' }}>
+                          {c.phone ? c.phone : 'Sin teléfono'} · {cuentas.filter(x => x.cliente_id === c.id && x.status === 'pendiente').length} crédito(s) pendiente(s)
+                        </Typography>
+                      </Box>
+                      <Tooltip title="Editar">
+                        <IconButton size="small" onClick={() => setClienteEditar({ id: c.id, name: c.name, phone: c.phone || '' })} aria-label={`Editar ${c.name}`} sx={{ color: '#2D5A1E' }}>
+                          <Edit fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                      <Tooltip title="Desactivar">
+                        <IconButton size="small" onClick={() => handleDesactivarCliente(c)} aria-label={`Desactivar ${c.name}`} sx={{ color: '#C62828' }}>
+                          <Delete fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    </>
+                  )}
+                </Box>
+              ))
+            })()}
+          </Box>
+        </DialogContent>
+      </Dialog>
+
       {/* Snackbar */}
       <Snackbar open={snack.open} autoHideDuration={4000} onClose={() => setSnack(s => ({ ...s, open: false }))} anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}>
         <Alert onClose={() => setSnack(s => ({ ...s, open: false }))} severity={snack.severity} variant="filled" role="status" aria-live="polite"
           sx={{ width: '100%', borderRadius: 2 }}>{snack.msg}</Alert>
       </Snackbar>
+    </Box>
+  )
+}
+
+function ClientesCreditosView({ clientes, cuentas, busqueda, onCobrar, onGestionar }) {
+  const q = busqueda.trim().toLowerCase()
+
+  const grupos = (() => {
+    const pendientes = cuentas.filter(c => c.status === 'pendiente' && c.cliente_id != null)
+    const porCliente = new Map()
+    for (const c of pendientes) {
+      if (!porCliente.has(c.cliente_id)) porCliente.set(c.cliente_id, [])
+      porCliente.get(c.cliente_id).push(c)
+    }
+    const lista = []
+    for (const [id, cuentasCli] of porCliente.entries()) {
+      const cliente = clientes.find(cl => cl.id === id) || { id, name: cuentasCli[0].client_name }
+      if (q && !cliente.name.toLowerCase().includes(q)) continue
+      const ordenadas = [...cuentasCli].sort((a, b) => new Date(a.due_date || a.created_at || 0) - new Date(b.due_date || b.created_at || 0))
+      const total = cuentasCli.reduce((s, c) => s + (c.saldo_usd ?? c.total_usd ?? 0), 0)
+      lista.push({ cliente, cuentas: ordenadas, total })
+    }
+    return lista.sort((a, b) => b.total - a.total)
+  })()
+
+  if (grupos.length === 0) {
+    return (
+      <Box sx={{ p: 4, textAlign: 'center', bgcolor: '#FFFDF8', borderRadius: 3, border: '1px dashed rgba(201, 149, 42, 0.3)' }}>
+        <Group sx={{ fontSize: 40, color: '#C9952A', opacity: 0.6 }} aria-hidden="true" />
+        <Typography sx={{ color: '#6B5344', mt: 1 }}>No hay créditos pendientes agrupables por cliente.</Typography>
+        <Button onClick={onGestionar} startIcon={<People />} sx={{ mt: 1.5, color: '#2D5A1E', fontWeight: 600 }}>Gestionar directorio</Button>
+      </Box>
+    )
+  }
+
+  return (
+    <Box sx={{ display: 'grid', gap: 2, gridTemplateColumns: { xs: '1fr', md: 'repeat(2, 1fr)' } }}>
+      {grupos.map(({ cliente, cuentas: cs, total }) => (
+        <Paper key={cliente.id} sx={{ p: 2, borderRadius: 3, border: '1px solid rgba(201, 149, 42, 0.15)', boxShadow: '0 1px 4px rgba(44, 24, 16, 0.06)', animation: 'fade-in-up 0.4s ease-out both' }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, mb: 1 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
+              <Avatar sx={{ bgcolor: '#2D5A1E', width: 34, height: 34, fontSize: '0.9rem' }}>{cliente.name.charAt(0).toUpperCase()}</Avatar>
+              <Box sx={{ minWidth: 0 }}>
+                <Typography sx={{ fontWeight: 700, color: '#2C1810', fontSize: '0.95rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cliente.name}</Typography>
+                <Chip size="small" label={`${cs.length} pendiente(s)`} sx={{ height: 18, fontSize: '0.65rem', bgcolor: 'rgba(201, 149, 42, 0.15)', color: '#A87C1F' }} />
+              </Box>
+            </Box>
+            <Box sx={{ textAlign: 'right' }}>
+              <Typography sx={{ fontWeight: 700, color: '#2D5A1E', fontSize: '1.05rem', whiteSpace: 'nowrap' }}>{money(total, 'USD')}</Typography>
+            </Box>
+          </Box>
+          <Divider sx={{ my: 1 }} />
+          <Box sx={{ display: 'grid', gap: 0.5, mb: 1.5 }}>
+            {cs.map(c => (
+              <Box key={c.id} sx={{ display: 'flex', justifyContent: 'space-between', gap: 1, fontSize: '0.78rem', color: '#6B5344' }}>
+                <span>Venta #{c.sale_id}{c.due_date ? ` · vence ${formatFechaCorta(c.due_date)}` : ''}</span>
+                <strong style={{ color: '#2C1810' }}>{money(c.saldo_usd ?? c.total_usd, 'USD')}</strong>
+              </Box>
+            ))}
+          </Box>
+          <Button fullWidth variant="contained" onClick={() => onCobrar(cliente)}
+            startIcon={<AccountBalanceWallet />}
+            sx={{ bgcolor: '#2D5A1E', borderRadius: 2, fontWeight: 600, '&:hover': { bgcolor: '#1E3D14' } }}>
+            Cobrar consolidado
+          </Button>
+        </Paper>
+      ))}
     </Box>
   )
 }

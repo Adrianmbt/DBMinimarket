@@ -49,9 +49,9 @@ call "venv\Scripts\activate.bat"
 python -m pip install --upgrade pip >nul
 
 if exist requeriments.txt (
-    pip install -r requeriments.txt
+    python -m pip install -r requeriments.txt
 ) else (
-    pip install -r requirements.txt
+    python -m pip install -r requirements.txt
 )
 if errorlevel 1 goto err_pip
 
@@ -72,7 +72,12 @@ if errorlevel 1 goto err_npm
 cd ..
 
 echo.
-echo =^> 5. Cargando datos iniciales...
+echo =^> 5. Base de datos...
+if exist minimarket.db (
+    echo [SKIP] Ya existe minimarket.db. Se conserva la base de datos actual.
+    goto db_lista
+)
+echo No existe minimarket.db; cargando datos iniciales...
 python seed_data.py
 if errorlevel 1 goto err_seed
 
@@ -85,6 +90,7 @@ if exist smilla.db (
     echo [SKIP] No se encontro smilla.db, se usa la semilla por defecto.
 )
 
+:db_lista
 call deactivate
 
 echo.

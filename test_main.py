@@ -1234,3 +1234,70 @@ def test_creditos_cobro_mixto():
     assert pago["payment_method"] == "Mixto ($ + Pago Móvil)"
     assert abs(pago["monto_usd"] - 8.0) < 0.01
     assert pago["received_usd"] == 4.0 and pago["received_bs"] == exacto_bs
+
+
+def test_venta_servicio_y_precio_fijo_en_bs():
+    """Servicio cobrado en Bs. (price_bs) y precio fijo (sale_price en Bs.)
+
+    Ambos se convierten a USD con la tasa BCV; el total de la venta es USD y el
+    servicio no descuenta stock.
+    """
+    h = _auth(_login())
+
+    # Servicio: la categoría aporta category_type
+    cat_svc = client.post("/api/categorias", json={"name": "Servicios", "category_type": "service"}, headers=h).json()
+    svc = client.post("/api/productos", json={
+        "barcode": "9001", "name": "Delivery", "cost_price": 0.0, "sale_price": 0.0,
+        "stock": 0, "min_stock": 0, "category_id": cat_svc["id"],
+    }, headers=h).json()
+    assert svc["category_type"] == "service"
+
+    # Sin price_bs el backend rechaza el servicio
+    r = client.post("/api/ventas", json={"items": [{"product_id": svc["id"], "quantity": 1}]}, headers=h)
+    assert r.status_code == 400 and "price_bs" in r.json()["detail"]
+
+    # Con price_bs: total USD = price_bs / tasa y no toca el stock
+    price_bs = 360.0
+    venta = client.post("/api/ventas", json={
+        "items": [{"product_id": svc["id"], "quantity": 1, "price_bs": price_bs}],
+    }, headers=h).json()
+    assert abs(venta["total"] - price_bs / venta["rate_usd"]) < 0.01
+
+    # Precio fijo: sale_price se guarda en Bs. y se convierte a USD por unidad
+    cat_fx = client.post("/api/categorias", json={"name": "Precio Fijo", "category_type": "fixed_bs"}, headers=h).json()
+    fx = client.post("/api/productos", json={
+        "barcode": "9002", "name": "Cafe", "cost_price": 1.0, "sale_price": 100.0,
+        "stock": 5, "min_stock": 1, "category_id": cat_fx["id"],
+    }, headers=h).json()
+    assert fx["category_type"] == "fixed_bs"
+    venta2 = client.post("/api/ventas", json={"items": [{"product_id": fx["id"], "quantity": 2}]}, headers=h).json()
+    assert abs(venta2["total"] - (100.0 / venta2["rate_usd"]) * 2) < 0.01
+    assert client.get(f"/api/productos/{fx['id']}", headers=h).json()["stock"] == 3
+
+
+def test_producto_sin_codigo_de_barras():
+    """Varios productos pueden ir sin código de barras ('' = sin código).
+
+    El índice único de products.barcode no debe truchar cuando el usuario deja
+    el campo vacío (el formulario envía cadena vacía, no NULL).
+    """
+    h = _auth(_login())
+    cat = client.post("/api/categorias", json={"name": "Precio Fijo", "category_type": "fixed_bs"}, headers=h).json()
+    base = {
+        "barcode": "", "cost_price": 1.0, "sale_price": 100.0,
+        "stock": 3, "min_stock": 1, "category_id": cat["id"],
+    }
+
+    r1 = client.post("/api/productos", json={**base, "name": "Precio fijo A"}, headers=h)
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["barcode"] is None
+
+    # Segundo producto sin código: hoy revienta con 500 (UNIQUE barcode)
+    r2 = client.post("/api/productos", json={**base, "name": "Precio fijo B"}, headers=h)
+    assert r2.status_code == 200, r2.text
+
+    # Un código real sigue siendo único
+    r3 = client.post("/api/productos", json={**base, "name": "Con código", "barcode": "7777777"}, headers=h)
+    assert r3.status_code == 200, r3.text
+    r4 = client.post("/api/productos", json={**base, "name": "Duplicado", "barcode": "7777777"}, headers=h)
+    assert r4.status_code == 400

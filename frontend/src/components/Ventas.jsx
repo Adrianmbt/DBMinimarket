@@ -4,22 +4,24 @@ import {
   Paper, Button, Dialog, DialogTitle, DialogContent, DialogActions,
   TextField, Typography, IconButton, MenuItem, Select, FormControl, InputLabel,
   Alert, Snackbar, Box, Chip, Avatar, Divider, Slide, Switch, FormControlLabel, Tooltip,
-  CircularProgress,
+  CircularProgress, useMediaQuery, Autocomplete,
 } from '@mui/material'
 import {
   Add, Visibility, PointOfSale, Search, Close, AddCircle,
   RemoveCircle, Delete, ShoppingCart, Receipt, QrCodeScanner,
   Lock, CalendarToday, AssignmentTurnedIn, Edit, LockOpen,
-  PriceCheck,
+  PriceCheck, ExpandMore, ExpandLess,
 } from '@mui/icons-material'
 import { getVentas, createVenta, updateVenta, deleteVenta, descargarReporteZ, descargarFactura, getEstadoCierre, getResumenDia, cerrarCaja, abrirCaja } from '../api/ventas'
 import { getProductos } from '../api/productos'
+import { getClientes } from '../api/clientes'
 import { getTasa } from '../api/tasa'
 import Paginador from './Paginador'
 import { usePaginacion } from '../hooks/usePaginacion'
 import { limpiarNumero } from '../utils/num'
 import { aFechaVE, hoyISO as hoyLocalISO } from '../utils/date'
 import { mensajeError } from '../utils/error'
+import { esVendible } from '../utils/productos'
 import ConsultaPrecios from './ConsultaPrecios'
 
 export const formatNumber = (n, digits = 2) => {
@@ -82,6 +84,8 @@ export default function Ventas() {
   const [editVenta, setEditVenta] = useState(null)
   const [editLineas, setEditLineas] = useState([])
   const [editCliente, setEditCliente] = useState('')
+  const [editClienteSel, setEditClienteSel] = useState(null)
+  const [clientes, setClientes] = useState([])
   const [editMetodo, setEditMetodo] = useState('')
   const [editReferencia, setEditReferencia] = useState('')
   const [editStocks, setEditStocks] = useState({})
@@ -135,9 +139,14 @@ export default function Ventas() {
   const [resumen, setResumen] = useState(null)
   const [resumenLoading, setResumenLoading] = useState(false)
   const [previewLoading, setPreviewLoading] = useState(false)
+  const [taxOpen, setTaxOpen] = useState(false)
+  const [highlightId, setHighlightId] = useState(null)
+
+  const isWide = useMediaQuery('(min-width: 1000px)')
 
   const searchRef = useRef(null)
   const resultsRef = useRef(null)
+  const highlightTimer = useRef(null)
 
   const rawUser = typeof window !== 'undefined' ? (localStorage.getItem('user') || sessionStorage.getItem('user')) : null
   const user = JSON.parse(rawUser || '{}')
@@ -159,6 +168,7 @@ export default function Ventas() {
   useEffect(() => {
     aplicarFechaFiltro(hoyISO)
     loadEstado()
+    getClientes().then(r => setClientes(r.data)).catch(() => {})
   }, [])
 
   const aplicarFechaFiltro = async (fecha) => {
@@ -223,6 +233,7 @@ export default function Ventas() {
 
   const filtered = search.trim()
     ? productos.filter(p => {
+        if (!esVendible(p)) return false
         const q = search.toLowerCase()
         return p.name.toLowerCase().includes(q) ||
                (p.barcode && p.barcode.toLowerCase().includes(q))
@@ -282,6 +293,9 @@ export default function Ventas() {
     setEditStocks(stocks)
     setEditVenta(v)
     setEditCliente(v.client_name || '')
+    setEditClienteSel(v.is_credit
+      ? (clientes.find(c => c.name.trim().toLowerCase() === (v.client_name || '').trim().toLowerCase()) || null)
+      : null)
     const metodoOriginal = v.payment_method || ''
     if (metodoOriginal.startsWith('Mixto')) {
       const m = metodoOriginal.match(/^Mixto \(\$ \+ (.+)\)$/)
@@ -407,6 +421,7 @@ export default function Ventas() {
       await updateVenta(editVenta.id, {
         payment_method: metodoFinal,
         client_name: editCliente.trim() || null,
+        ...(editVenta.is_credit && editClienteSel ? { cliente_id: editClienteSel.id } : {}),
         reference: necesitaRefAhora ? (refActual.trim() || null) : null,
         ...(editVenta.is_credit ? {} : {
           received_bs: eRecBs > 0 ? eRecBs : 0,
@@ -487,7 +502,37 @@ export default function Ventas() {
   }
 
   const addToCart = useCallback((producto) => {
+    const tipo = producto.category_type || producto.category?.category_type || 'normal'
     const esPeso = producto.sale_unit === 'peso'
+
+    if (tipo === 'service') {
+      const input = window.prompt('Monto en Bs. para el servicio (obligatorio):', '0')
+      if (input === null) return
+      const bs = parseFloat(String(input).replace(',', '.'))
+      if (isNaN(bs) || bs <= 0) {
+        alert('Monto inválido')
+        return
+      }
+      setCart(prev => [...prev, {
+        lineId: `svc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        product_id: producto.id,
+        name: producto.name,
+        barcode: producto.barcode,
+        sale_price: bs,
+        cost_price: producto.cost_price,
+        sale_unit: producto.sale_unit,
+        unitQty: 1,
+        weightG: 0,
+        max_stock: 1,
+        isService: true,
+        price_bs_manual: bs,
+      }])
+      setSearch('')
+      setShowResults(false)
+      setTimeout(() => searchRef.current?.focus(), 100)
+      return
+    }
+
     setCart(prev => {
       const existing = prev.find(c => c.product_id === producto.id)
       if (existing) {
@@ -503,15 +548,18 @@ export default function Ventas() {
         name: producto.name,
         barcode: producto.barcode,
         sale_price: producto.sale_price,
+        cost_price: producto.cost_price,
         sale_unit: producto.sale_unit,
         unitQty: esPeso ? 0 : 1,
         weightG: esPeso ? 1000 : 0,
         max_stock: producto.stock,
+        isFixedBs: tipo === 'fixed_bs',
+        isService: false,
       }]
     })
     setSearch('')
     setShowResults(false)
-    setTimeout(() => searchRef.current?.focus(), 50)
+    setTimeout(() => searchRef.current?.focus(), 100)
   }, [])
 
   const updateQuantity = (productId, delta) => {
@@ -546,15 +594,28 @@ export default function Ventas() {
     )
   }
 
-  const removeFromCart = (productId) => {
-    setCart(prev => prev.filter(c => c.product_id !== productId))
+  const removeFromCart = (item) => {
+    setCart(prev => prev.filter(c =>
+      item.lineId ? c.lineId !== item.lineId : c.product_id !== item.product_id
+    ))
   }
 
+  const tasaActual = tasa || 0
+  // Servicio (monto cobrado a mano en Bs.) y precio fijo se guardan en Bs.;
+  // el backend los convierte a USD con la tasa BCV, así que el carrito debe
+  // hacer lo mismo para que el total coincida con lo que se cobra.
+  const aUsd = (bs) => (tasaActual > 0 ? bs / tasaActual : 0)
+  const precioUnitUsd = (c) =>
+    c.isService ? aUsd(c.price_bs_manual) : c.isFixedBs ? aUsd(c.sale_price) : c.sale_price
+
   const subtotalDe = (c) =>
-    c.sale_unit === 'peso' ? c.sale_price * ((c.weightG || 0) / 1000) : c.sale_price * c.unitQty
+    c.isService
+      ? precioUnitUsd(c)
+      : c.sale_unit === 'peso'
+        ? precioUnitUsd(c) * ((c.weightG || 0) / 1000)
+        : precioUnitUsd(c) * (c.unitQty || 0)
 
   const totalUSD = cart.reduce((sum, c) => sum + subtotalDe(c), 0)
-  const tasaActual = tasa || 0
   // En cobro mixto la moneda de cobro/cambio es la de la primera pata.
   const mixedCurrency1 = currencyOf(mixedMethod1)
   const mixedCurrency2 = currencyOf(mixedMethod2)
@@ -619,7 +680,7 @@ export default function Ventas() {
 
     if (val.trim()) {
       const exactBarcode = productos.find(p =>
-        p.barcode && p.barcode.toLowerCase() === val.trim().toLowerCase()
+        p.barcode && p.barcode.toLowerCase() === val.trim().toLowerCase() && esVendible(p)
       )
       if (exactBarcode) {
         openEdit ? addToEdit(exactBarcode) : addToCart(exactBarcode)
@@ -692,10 +753,15 @@ export default function Ventas() {
         change_bs: monedaTotal === 'BS' && cambio != null ? Math.max(cambio, 0) : null,
         change_usd: monedaTotal === 'USD' && cambio != null ? Math.max(cambio, 0) : null,
         is_credit: false,
-        items: cart.map(c =>
-          c.sale_unit === 'peso'
-            ? { product_id: c.product_id, quantity: Math.round(c.weightG || 0) }
-            : { product_id: c.product_id, quantity: c.unitQty }),
+        items: cart.map(c => {
+        const base = c.sale_unit === 'peso'
+          ? { product_id: c.product_id, quantity: Math.round(c.weightG || 0) }
+          : { product_id: c.product_id, quantity: c.unitQty }
+        if (c.isService) {
+          return { ...base, price_bs: c.price_bs_manual }
+        }
+        return base
+      }),
       })
       setSnack({ open: true, msg: 'Venta registrada exitosamente', severity: 'success' })
       setOpenCreate(false)
@@ -1112,33 +1178,79 @@ export default function Ventas() {
       <Dialog
         open={openCreate}
         onClose={() => setOpenCreate(false)}
-        maxWidth="md"
+        maxWidth="lg"
         fullWidth
+        fullScreen={!isWide}
         slots={{ transition: Slide }}
-        slotProps={{ paper: { sx: { borderRadius: 3, overflow: 'hidden', minHeight: 500 } }, transition: { direction: 'up' } }}
+        slotProps={{
+          paper: {
+            sx: {
+              borderRadius: isWide ? 3 : 0,
+              overflow: 'hidden',
+              display: 'flex', flexDirection: 'column',
+              height: isWide ? 'min(96dvh, 960px)' : '100%',
+            },
+          },
+          transition: { direction: 'up' },
+        }}
       >
         <DialogTitle sx={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          bgcolor: '#C9952A', color: '#FFF8F0', py: 2, px: 3,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1.5,
+          bgcolor: '#C9952A', color: '#FFF8F0', py: 1.2, px: 2.5, flexShrink: 0,
         }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 0 }}>
             <Add sx={{ fontSize: 22 }} />
-            <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 600, fontSize: '1.15rem' }}>
+            <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 600, fontSize: '1.15rem', whiteSpace: 'nowrap' }}>
               Nueva Venta
             </Typography>
           </Box>
-          <IconButton
-            onClick={() => setOpenCreate(false)}
-            size="small"
-            sx={{ color: 'rgba(255, 248, 240, 0.6)', '&:hover': { color: '#FFF8F0', bgcolor: 'rgba(255,248,240,0.1)' } }}
-          >
-            <Close fontSize="small" />
-          </IconButton>
+
+          {/* Total + Consultar precio en el header (libera el pie para el carrito) */}
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, ml: 'auto' }}>
+            <Box sx={{ textAlign: 'right', lineHeight: 1.05 }}>
+              <Typography sx={{ fontSize: '0.6rem', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'rgba(255,248,240,0.75)' }}>
+                Total a cobrar
+              </Typography>
+              <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 700, fontSize: '1.3rem', whiteSpace: 'nowrap' }}>
+                {totalEnDivisa}
+              </Typography>
+              {totalUSD > 0 && (
+                <Typography sx={{ fontSize: '0.62rem', color: 'rgba(255,248,240,0.8)', whiteSpace: 'nowrap' }}>
+                  {money(totalUSD, 'USD')}{tasaActual ? ` · Bs. ${formatNumber(tasaActual)}` : ''}
+                </Typography>
+              )}
+            </Box>
+            <Button
+              onClick={() => setConsultaPreciosOpen(true)}
+              startIcon={<PriceCheck />}
+              size="small"
+              sx={{
+                color: '#FFF8F0', fontWeight: 500, borderRadius: 2, px: 1.5,
+                border: '1px solid rgba(255, 248, 240, 0.4)',
+                bgcolor: 'rgba(255, 248, 240, 0.1)',
+                '&:hover': { bgcolor: 'rgba(255, 248, 240, 0.2)' },
+                whiteSpace: 'nowrap',
+              }}
+            >
+              <Box component="span" sx={{ display: { xs: 'none', sm: 'inline' } }}>Consultar precio</Box>
+            </Button>
+            <IconButton
+              onClick={() => setOpenCreate(false)}
+              size="small"
+              sx={{ color: 'rgba(255, 248, 240, 0.6)', '&:hover': { color: '#FFF8F0', bgcolor: 'rgba(255,248,240,0.1)' } }}
+            >
+              <Close fontSize="small" />
+            </IconButton>
+          </Box>
         </DialogTitle>
 
-        <DialogContent sx={{ p: 0, display: 'flex', flexDirection: 'column', height: '100%' }}>
+        <DialogContent sx={{ p: 0, flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          {/* Fila principal: carrito (izq) + panel de pago (der) */}
+          <Box sx={{ display: 'flex', flexDirection: isWide ? 'row' : 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          {/* Columna izquierda: buscador + carrito */}
+          <Box sx={{ display: 'flex', flexDirection: 'column', flex: isWide ? '1.7 1 0' : '1 1 auto', minWidth: 0, minHeight: 0 }}>
           {/* Search Bar */}
-          <Box sx={{ position: 'relative', px: 3, pt: 3, pb: 0 }}>
+          <Box sx={{ position: 'relative', px: 2.5, pt: 2, pb: 0, flexShrink: 0 }}>
             <Box sx={{ position: 'relative' }}>
               <TextField
                 inputRef={searchRef}
@@ -1178,7 +1290,7 @@ export default function Ventas() {
               <Paper
                 ref={resultsRef}
                 sx={{
-                  position: 'absolute', top: '100%', left: 24, right: 24, zIndex: 10,
+                  position: 'absolute', top: '100%', left: 20, right: 20, zIndex: 10,
                   maxHeight: 220, overflow: 'auto', mt: 0.5, borderRadius: 2,
                   boxShadow: '0 8px 24px rgba(44, 24, 16, 0.12)',
                   border: '1px solid rgba(201, 149, 42, 0.1)',
@@ -1224,7 +1336,7 @@ export default function Ventas() {
             {showResults && search.trim() && filtered.length === 0 && (
               <Paper
                 sx={{
-                  position: 'absolute', top: '100%', left: 24, right: 24, zIndex: 10,
+                  position: 'absolute', top: '100%', left: 20, right: 20, zIndex: 10,
                   mt: 0.5, borderRadius: 2, p: 2, textAlign: 'center',
                   boxShadow: '0 8px 24px rgba(44, 24, 16, 0.12)',
                 }}
@@ -1236,51 +1348,8 @@ export default function Ventas() {
             )}
           </Box>
 
-          {/* Client & Reference */}
-          <Box sx={{ px: 3, pt: 2 }}>
-            <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-              <TextField
-                label="Nombre del cliente"
-                value={clientName}
-                onChange={e => setClientName(e.target.value)}
-                size="small"
-                placeholder="Opcional"
-                sx={{
-                  flex: 1, minWidth: 180,
-                  '& .MuiOutlinedInput-root': {
-                    borderRadius: 2, bgcolor: '#F8F5F0',
-                    '& fieldset': { borderColor: 'rgba(201, 149, 42, 0.15)' },
-                    '&:hover fieldset': { borderColor: 'rgba(201, 149, 42, 0.3)' },
-                    '&.Mui-focused fieldset': { borderColor: '#C9952A' },
-                  },
-                }}
-              />
-              {METHODS_WITH_REFERENCE.includes(paymentMethod) && (
-                <TextField
-                  label="Referencia"
-                  value={reference}
-                  onChange={e => setReference(e.target.value)}
-                  size="small"
-                  placeholder="Número de referencia"
-                  required
-                  sx={{
-                    flex: 1, minWidth: 180,
-                    '& .MuiOutlinedInput-root': {
-                      borderRadius: 2, bgcolor: '#F8F5F0',
-                      '& fieldset': { borderColor: 'rgba(201, 149, 42, 0.15)' },
-                      '&:hover fieldset': { borderColor: 'rgba(201, 149, 42, 0.3)' },
-                      '&.Mui-focused fieldset': { borderColor: '#C9952A' },
-                    },
-                  }}
-                />
-              )}
-            </Box>
-          </Box>
-
-          <Divider sx={{ mx: 3, my: 2 }} />
-
           {/* Cart */}
-          <Box sx={{ flex: 1, px: 3, overflow: 'auto', minHeight: 180 }}>
+          <Box sx={{ flex: 1, minHeight: 0, px: 2.5, pb: 1, overflow: 'auto' }}>
             {cart.length === 0 ? (
               <Box sx={{ textAlign: 'center', py: 4 }}>
                 <ShoppingCart sx={{ fontSize: 48, color: '#E8C46A', mb: 1, opacity: 0.4 }} />
@@ -1293,14 +1362,17 @@ export default function Ventas() {
               </Box>
             ) : (
               <>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, position: 'sticky', top: 0, zIndex: 1, bgcolor: '#FFF8F0' }}>
                   <Receipt sx={{ fontSize: 18, color: '#6B5344', opacity: 0.5 }} />
                   <Typography sx={{ fontWeight: 600, color: '#2C1810', fontSize: '0.85rem' }}>
                     Carrito ({itemsCount} item{itemsCount !== 1 ? 's' : ''})
                   </Typography>
+                  <Typography sx={{ fontSize: '0.7rem', color: '#6B5344', opacity: 0.6, ml: 'auto' }}>
+                    Último agregado arriba
+                  </Typography>
                 </Box>
 
-                <Table size="small">
+                <Table size="small" sx={{ '& .MuiTableCell-root': { py: 0.5 } }}>
                   <TableHead>
                     <TableRow sx={{ bgcolor: '#F8F5F0' }}>
                       <TableCell sx={{ fontWeight: 600, color: '#6B5344', fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Producto</TableCell>
@@ -1311,12 +1383,15 @@ export default function Ventas() {
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {cart.map((c, i) => (
+                    {[...cart].reverse().map((c) => (
                       <TableRow
-                        key={c.product_id}
+                        key={c.lineId || c.product_id}
                         sx={{
-                          animation: `fade-in-up 0.2s ease-out ${i * 0.03}s both`,
-                          '&:hover': { bgcolor: 'rgba(201, 149, 42, 0.03)' },
+                          animation: 'row-enter 0.28s ease-out both',
+                          bgcolor: c.product_id === highlightId ? 'rgba(201, 149, 42, 0.12)' : 'transparent',
+                          boxShadow: c.product_id === highlightId ? 'inset 3px 0 0 #C9952A' : 'none',
+                          transition: 'background-color 0.45s ease, box-shadow 0.45s ease',
+                          '&:hover': { bgcolor: 'rgba(201, 149, 42, 0.05)' },
                         }}
                       >
                         <TableCell>
@@ -1333,7 +1408,7 @@ export default function Ventas() {
                           </Box>
                         </TableCell>
                         <TableCell align="center" sx={{ color: '#6B5344', fontSize: '0.85rem' }}>
-                          {money(c.sale_price, 'USD')}{c.sale_unit === 'peso' ? ' /kg' : ''}
+                          {money(c.sale_price, c.isService || c.isFixedBs ? 'BS' : 'USD')}{c.sale_unit === 'peso' && !c.isService ? ' /kg' : ''}
                         </TableCell>
                         <TableCell align="center">
                           {c.sale_unit === 'peso' ? (
@@ -1412,7 +1487,7 @@ export default function Ventas() {
                         <TableCell sx={{ p: 0.5 }}>
                           <IconButton
                             size="small"
-                            onClick={() => removeFromCart(c.product_id)}
+                            onClick={() => removeFromCart(c)}
                             sx={{ color: '#C62828', opacity: 0.5, '&:hover': { opacity: 1, bgcolor: 'rgba(198, 40, 40, 0.08)' } }}
                           >
                             <Delete fontSize="small" />
@@ -1425,15 +1500,44 @@ export default function Ventas() {
               </>
             )}
           </Box>
+          </Box>
+          {/* fin columna izquierda */}
 
-          {/* Bottom: Payment + Total + Actions */}
+          {/* Columna derecha: cliente + pago */}
           <Box sx={{
-            borderTop: '1px solid rgba(201, 149, 42, 0.1)',
+            display: 'flex', flexDirection: 'column',
+            flex: isWide ? '1 1 0' : '0 0 auto',
+            minWidth: isWide ? 320 : 0, minHeight: 0,
+            borderLeft: isWide ? '1px solid rgba(201, 149, 42, 0.15)' : 'none',
+            borderTop: isWide ? 'none' : '1px solid rgba(201, 149, 42, 0.15)',
             bgcolor: '#F8F5F0',
-            px: 3, py: 2,
+            overflowY: 'auto',
+            maxHeight: isWide ? 'none' : '46vh',
           }}>
-            <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 2 }}>
-              <Box sx={{ minWidth: 200, flex: 1 }}>
+            {/* Cliente */}
+            <Box sx={{ px: 2, pt: 1.5, pb: 0, flexShrink: 0 }}>
+              <TextField
+                label="Nombre del cliente"
+                value={clientName}
+                onChange={e => setClientName(e.target.value)}
+                size="small"
+                placeholder="Opcional"
+                fullWidth
+                sx={{
+                  '& .MuiOutlinedInput-root': {
+                    borderRadius: 2, bgcolor: '#FFF8F0',
+                    '& fieldset': { borderColor: 'rgba(201, 149, 42, 0.15)' },
+                    '&:hover fieldset': { borderColor: 'rgba(201, 149, 42, 0.3)' },
+                    '&.Mui-focused fieldset': { borderColor: '#C9952A' },
+                  },
+                }}
+              />
+            </Box>
+
+            <Divider sx={{ mx: 2, my: 1 }} />
+
+            {/* Pago */}
+            <Box sx={{ px: 2, pb: 1, flexShrink: 0 }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5, gap: 2 }}>
                   <Typography sx={{ fontSize: '0.78rem', color: 'rgba(232, 99, 12, 0.75)' }}>
                     Tasa BCV: Bs. {formatNumber(tasaActual)}
@@ -1469,6 +1573,20 @@ export default function Ventas() {
                       ))}
                     </Select>
                   </FormControl>
+                )}
+
+                {/* Referencia del cobro simple (junto al método de pago) */}
+                {!mixed && METHODS_WITH_REFERENCE.includes(paymentMethod) && (
+                  <TextField
+                    label="Referencia"
+                    value={reference}
+                    onChange={e => setReference(e.target.value)}
+                    size="small"
+                    placeholder="Número de referencia"
+                    required
+                    fullWidth
+                    sx={{ mt: 1.5, '& .MuiOutlinedInput-root': { borderRadius: 2, bgcolor: '#FFF8F0' } }}
+                  />
                 )}
 
                 {/* Pago mixto: dos métodos cualesquiera, uno por pata */}
@@ -1556,14 +1674,14 @@ export default function Ventas() {
                     {mixed ? (
                       <>
                         <TextField
-                          label={`Recibe ${mixedMethod1} (${mixedCurrency1 === 'BS' ? 'Bs' : '$'})`}
+                          label={`Monto pagado (${mixedCurrency1 === 'BS' ? 'Bs' : '$'})`}
                           type="number"
                           value={mixedAmount1}
                           onChange={e => setMixedAmount1(e.target.value)}
                           slotProps={{ htmlInput: { min: 0, step: 0.01 } }}
                         />
                         <TextField
-                          label={`Recibe ${mixedMethod2} (${mixedCurrency2 === 'BS' ? 'Bs' : '$'})`}
+                          label={`Monto pagado (${mixedCurrency2 === 'BS' ? 'Bs' : '$'})`}
                           type="number"
                           value={mixedAmount2}
                           onChange={e => setMixedAmount2(e.target.value)}
@@ -1572,7 +1690,7 @@ export default function Ventas() {
                       </>
                     ) : (
                       <TextField
-                        label={monedaTotal === 'BS' ? 'Recibe en Bs' : 'Recibe en $'}
+                        label={monedaTotal === 'BS' ? 'Monto pagado (Bs)' : 'Monto pagado ($)'}
                         type="number"
                         value={monedaTotal === 'BS' ? receivedBs : receivedUsd}
                         onChange={e => monedaTotal === 'BS' ? setReceivedBs(e.target.value) : setReceivedUsd(e.target.value)}
@@ -1592,87 +1710,91 @@ export default function Ventas() {
                 )}
               </Box>
 
-              <Box sx={{ textAlign: 'right', minWidth: 160 }}>
-                <Typography variant="caption" sx={{ color: '#6B5344', textTransform: 'uppercase', letterSpacing: '0.08em', fontSize: '0.65rem' }}>
-                  Total a cobrar
-                </Typography>
-                <Typography sx={{
-                  fontFamily: '"Playfair Display", serif', fontWeight: 700,
-                  color: totalUSD > 0 ? '#2D5A1E' : '#6B5344',
-                  fontSize: '1.5rem', lineHeight: 1.2, whiteSpace: 'nowrap',
-                }}>
-                  {totalEnDivisa}
-                </Typography>
-                <Typography sx={{ fontSize: '0.72rem', color: '#6B5344' }}>
+              {/* Total + impuestos dentro del panel */}
+              <Box sx={{ px: 2, pb: 1.5, pt: 1, mt: 'auto' }}>
+                <Box sx={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 2 }}>
+                  <Typography variant="caption" sx={{ color: '#6B5344', textTransform: 'uppercase', letterSpacing: '0.08em', fontSize: '0.65rem' }}>
+                    Total a cobrar
+                  </Typography>
+                  <Typography sx={{
+                    fontFamily: '"Playfair Display", serif', fontWeight: 700,
+                    color: totalUSD > 0 ? '#2D5A1E' : '#6B5344',
+                    fontSize: '1.4rem', lineHeight: 1.2, whiteSpace: 'nowrap',
+                  }}>
+                    {totalEnDivisa}
+                  </Typography>
+                </Box>
+                <Typography sx={{ fontSize: '0.72rem', color: '#6B5344', textAlign: 'right' }}>
                   ({money(totalUSD, 'USD')} · tasa {tasaActual ? `Bs. ${tasaActual}` : 's/tasa'})
                 </Typography>
                 {totalUSD > 0 && (
-                  <Box sx={{ mt: 1, pt: 1, borderTop: '1px dashed rgba(201,149,42,0.25)', display: 'flex', flexDirection: 'column', gap: 0.3, minWidth: 200 }}>
-                    <Typography variant="caption" sx={{ color: '#6B5344', textTransform: 'uppercase', letterSpacing: '0.05em', fontSize: '0.6rem' }}>
-                      Impuestos incluidos ({monedaTotal === 'BS' ? 'Bs' : 'USD'})
-                    </Typography>
-                    <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}>
-                      Base: <b>{money(monedaTotal === 'BS' ? baseLive * (tasaActual || 1) : baseLive, monedaTotal)}</b>
-                    </Typography>
-                    <Typography sx={{ fontSize: '0.75rem', color: '#C9952A' }}>
-                      IVA 16%: <b>{money(monedaTotal === 'BS' ? ivaLive * (tasaActual || 1) : ivaLive, monedaTotal)}</b>
-                    </Typography>
-                    {tasaIgtfLive > 0 ? (
-                      <Typography sx={{ fontSize: '0.75rem', color: '#C62828' }}>
-                        IGTF {Math.round(tasaIgtfLive * 10000) / 100}%: <b>{money(igtfLive, 'USD')}</b>
+                  <Box sx={{ mt: 0.75, pt: 0.75, borderTop: '1px dashed rgba(201,149,42,0.25)' }}>
+                    <Box
+                      onClick={() => setTaxOpen(o => !o)}
+                      role="button"
+                      aria-expanded={taxOpen}
+                      sx={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 0.5, cursor: 'pointer', userSelect: 'none' }}
+                    >
+                      <Typography variant="caption" sx={{ color: '#6B5344', textTransform: 'uppercase', letterSpacing: '0.05em', fontSize: '0.6rem' }}>
+                        Impuestos incluidos
                       </Typography>
+                      {taxOpen ? <ExpandLess sx={{ fontSize: 14, color: '#6B5344' }} /> : <ExpandMore sx={{ fontSize: 14, color: '#6B5344' }} />}
+                    </Box>
+                    {taxOpen ? (
+                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.3, mt: 0.5 }}>
+                        <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}>
+                          Base: <b>{money(monedaTotal === 'BS' ? baseLive * (tasaActual || 1) : baseLive, monedaTotal)}</b>
+                        </Typography>
+                        <Typography sx={{ fontSize: '0.75rem', color: '#C9952A' }}>
+                          IVA 16%: <b>{money(monedaTotal === 'BS' ? ivaLive * (tasaActual || 1) : ivaLive, monedaTotal)}</b>
+                        </Typography>
+                        {tasaIgtfLive > 0 ? (
+                          <Typography sx={{ fontSize: '0.75rem', color: '#C62828' }}>
+                            IGTF {Math.round(tasaIgtfLive * 10000) / 100}%: <b>{money(igtfLive, 'USD')}</b>
+                          </Typography>
+                        ) : (
+                          <Typography sx={{ fontSize: '0.72rem', color: '#6B5344', opacity: 0.75 }}>
+                            IGTF: no aplica (solo pagos en $ efectivo)
+                          </Typography>
+                        )}
+                      </Box>
                     ) : (
-                      <Typography sx={{ fontSize: '0.72rem', color: '#6B5344', opacity: 0.75 }}>
-                        IGTF: no aplica (solo pagos en $ efectivo)
+                      <Typography sx={{ fontSize: '0.68rem', color: '#6B5344', mt: 0.25 }}>
+                        Base {money(monedaTotal === 'BS' ? baseLive * (tasaActual || 1) : baseLive, monedaTotal)} · IVA {money(monedaTotal === 'BS' ? ivaLive * (tasaActual || 1) : ivaLive, monedaTotal)}{tasaIgtfLive > 0 ? ` · IGTF ${money(igtfLive, 'USD')}` : ''}
                       </Typography>
                     )}
                   </Box>
                 )}
               </Box>
             </Box>
+          </Box>
+          {/* fin fila principal */}
 
-            <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1.5, mt: 2 }}>
-              <Button
-                onClick={() => setConsultaPreciosOpen(true)}
-                startIcon={<PriceCheck />}
-                sx={{
-                  color: '#6B5344', fontWeight: 500, borderRadius: 2, px: 2.5,
-                  border: '1px solid rgba(201, 149, 42, 0.3)',
-                  bgcolor: 'rgba(201, 149, 42, 0.06)',
-                  '&:hover': { bgcolor: 'rgba(201, 149, 42, 0.12)' },
-                }}
-              >
-                Consultar precio
-              </Button>
-              <Button
-                onClick={() => setOpenCreate(false)}
-                sx={{ color: '#6B5344', fontWeight: 500, borderRadius: 2, px: 3, '&:hover': { bgcolor: 'rgba(107,83,68,0.08)' } }}
-              >
-                Cancelar
-              </Button>
-              <Button
-                variant="contained"
-                onClick={handleCreate}
-                disabled={cart.length === 0 || submitting || !tasaActual}
-                sx={{
-                  background: 'linear-gradient(135deg, #2D5A1E 0%, #1E3D14 100%)',
-                  '&:hover': {
-                    background: 'linear-gradient(135deg, #3A7028 0%, #2D5A1E 100%)',
-                    transform: 'translateY(-1px)',
-                  },
-                  px: 4, py: 1.2, borderRadius: 2,
-                  fontWeight: 600, fontSize: '0.95rem',
-                  boxShadow: '0 4px 14px rgba(45, 90, 30, 0.3)',
-                  transition: 'all 0.2s ease',
-                  '&.Mui-disabled': {
-                    background: 'rgba(45, 90, 30, 0.3)',
-                    color: 'rgba(255, 248, 240, 0.5)',
-                  },
-                }}
-              >
-                {submitting ? 'Registrando...' : `Cobrar ${money(totalCobrar, monedaTotal)}`}
-              </Button>
-            </Box>
+          {/* Footer: solo el botón de cobrar */}
+          <Box sx={{ flexShrink: 0, px: 2, py: 1.2, borderTop: '1px solid rgba(201, 149, 42, 0.15)', bgcolor: '#F8F5F0', display: 'flex', justifyContent: 'flex-end' }}>
+            <Button
+              variant="contained"
+              onClick={handleCreate}
+              disabled={cart.length === 0 || submitting || !tasaActual || montoInsuficiente}
+              sx={{
+                background: 'linear-gradient(135deg, #2D5A1E 0%, #1E3D14 100%)',
+                '&:hover': {
+                  background: 'linear-gradient(135deg, #3A7028 0%, #2D5A1E 100%)',
+                  transform: 'translateY(-1px)',
+                },
+                width: { xs: '100%', md: 'auto' },
+                px: 4, py: 1.2, borderRadius: 2,
+                fontWeight: 600, fontSize: '0.95rem',
+                boxShadow: '0 4px 14px rgba(45, 90, 30, 0.3)',
+                transition: 'all 0.2s ease',
+                '&.Mui-disabled': {
+                  background: 'rgba(45, 90, 30, 0.3)',
+                  color: 'rgba(255, 248, 240, 0.5)',
+                },
+              }}
+            >
+              {submitting ? 'Registrando...' : `Cobrar ${money(totalCobrar, monedaTotal)}`}
+            </Button>
           </Box>
         </DialogContent>
       </Dialog>
@@ -1893,21 +2015,52 @@ export default function Ventas() {
         </DialogTitle>
         <DialogContent sx={{ pt: 3, px: 3 }}>
           <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', mb: 2 }}>
-            <TextField
-              label="Nombre del cliente"
-              value={editCliente}
-              onChange={e => setEditCliente(e.target.value)}
-              required={!!editVenta?.is_credit}
-              size="small"
-              placeholder={editVenta?.is_credit ? 'Obligatorio' : 'Opcional'}
-              sx={{
-                flex: 1, minWidth: 180,
-                '& .MuiOutlinedInput-root': {
-                  borderRadius: 2, bgcolor: '#F8F5F0',
-                  '& fieldset': { borderColor: 'rgba(45, 90, 30, 0.15)' },
-                },
-              }}
-            />
+            {editVenta?.is_credit ? (
+              <Autocomplete
+                freeSolo
+                size="small"
+                options={clientes}
+                getOptionLabel={(o) => (typeof o === 'string' ? o : o.name || '')}
+                value={editClienteSel}
+                inputValue={editCliente}
+                onInputChange={(_, val, reason) => { if (reason === 'input' || reason === 'reset') setEditCliente(val || '') }}
+                onChange={(_, val) => {
+                  if (val && typeof val === 'object') { setEditClienteSel(val); setEditCliente(val.name) }
+                  else { setEditClienteSel(null); setEditCliente(val || '') }
+                }}
+                noOptionsText="Sin coincidencias: se vinculará por nombre"
+                sx={{ flex: 1, minWidth: 180 }}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="Nombre del cliente"
+                    required
+                    placeholder="Obligatorio"
+                    sx={{
+                      '& .MuiOutlinedInput-root': {
+                        borderRadius: 2, bgcolor: '#F8F5F0',
+                        '& fieldset': { borderColor: 'rgba(45, 90, 30, 0.15)' },
+                      },
+                    }}
+                  />
+                )}
+              />
+            ) : (
+              <TextField
+                label="Nombre del cliente"
+                value={editCliente}
+                onChange={e => setEditCliente(e.target.value)}
+                size="small"
+                placeholder="Opcional"
+                sx={{
+                  flex: 1, minWidth: 180,
+                  '& .MuiOutlinedInput-root': {
+                    borderRadius: 2, bgcolor: '#F8F5F0',
+                    '& fieldset': { borderColor: 'rgba(45, 90, 30, 0.15)' },
+                  },
+                }}
+              />
+            )}
             {!editVenta?.is_credit ? (
               <>
                 <FormControl size="small" sx={{ minWidth: 190 }}>

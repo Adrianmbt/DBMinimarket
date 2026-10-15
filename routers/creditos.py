@@ -1,14 +1,16 @@
 import re
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import func
 from datetime import datetime, timezone, timedelta
 from database import get_db
-from models import CuentaCredito, Sale, SaleDetail, Product, PagoCredito
+from models import CuentaCredito, Sale, SaleDetail, Product, PagoCredito, Cliente
 from schemas import CuentaCreditoResponse, CreditoResumen, CuentaCreditoUpdate, PagarCuentaRequest
 from security import get_current_user, requiere_admin
 from routers.ventas import _validar_caja_abierta, _default_rate
+from routers.clientes import get_or_create_cliente
 from time_ve import hoy_ve, dia_de_utc_naive
 
 router = APIRouter(prefix="/api/creditos", tags=["Crédito"])
@@ -206,6 +208,130 @@ def registrar_cobro(
     ).filter(CuentaCredito.id == cuenta_id).first()
 
 
+@router.post("/cliente/{cliente_id}/pagar")
+def registrar_cobro_cliente(
+    cliente_id: int,
+    datos: PagarCuentaRequest,
+    db: Session = Depends(get_db),
+    user: object = Depends(get_current_user),
+):
+    """Registra un cobro consolidado sobre TODAS las cuentas pendientes de un
+    cliente (solo administrador).
+
+    - Sin monto_usd: cobra el saldo total consolidado del cliente.
+    - Con monto_usd menor: abono parcial, repartido FIFO (compra más antigua
+      primero); las cuentas cubiertas quedan como pagadas.
+    - Cada cuenta recibe su propio PagoCredito, agrupados por `grupo_pago`.
+    """
+    requiere_admin(user)
+
+    cliente = db.query(Cliente).filter(Cliente.id == cliente_id).first()
+    if not cliente:
+        raise HTTPException(404, "Cliente no encontrado")
+
+    cuentas = db.query(CuentaCredito).options(
+        selectinload(CuentaCredito.pagos),
+        selectinload(CuentaCredito.sale).selectinload(Sale.details).selectinload(SaleDetail.product),
+    ).filter(
+        CuentaCredito.cliente_id == cliente_id,
+        CuentaCredito.status == "pendiente",
+    ).order_by(CuentaCredito.created_at.asc()).all()
+
+    if not cuentas:
+        raise HTTPException(400, "El cliente no tiene créditos pendientes")
+
+    metodo = (datos.payment_method or "").strip()
+    if not metodo:
+        raise HTTPException(400, "Selecciona el método de pago con el que cancela el cliente")
+
+    # En mixto ($ + <método Bs>) la referencia se exige según el método en bolívares
+    bs_metodo = None
+    m_mixto = re.match(r"^Mixto \(\$ \+ (.+)\)$", metodo)
+    if m_mixto:
+        bs_metodo = m_mixto.group(1).strip()
+    metodo_para_ref = bs_metodo or metodo
+    referencia = (datos.reference or "").strip() or None
+    if metodo_para_ref in METODOS_ELECTRONICOS_BS and not referencia:
+        raise HTTPException(400, f"Ingresa la referencia bancaria del pago ({metodo_para_ref})")
+
+    received_bs = datos.received_bs or 0.0
+    received_usd = datos.received_usd or 0.0
+
+    tasa = _default_rate(db)
+    if tasa <= 0:
+        raise HTTPException(503, "No hay tasa de cambio disponible. Actualiza la tasa.")
+
+    saldo_total = round(sum(c.saldo_usd for c in cuentas), 2)
+    if saldo_total <= 0.005:
+        raise HTTPException(400, "El cliente no tiene saldo pendiente")
+
+    monto = round(datos.monto_usd, 2) if datos.monto_usd is not None else saldo_total
+    if monto <= 0:
+        raise HTTPException(400, "El monto a cobrar debe ser mayor a cero")
+    if monto > saldo_total + 0.005:
+        raise HTTPException(400, f"El abono (${monto}) excede el saldo pendiente (${saldo_total})")
+
+    if m_mixto:
+        if received_usd <= 0 and received_bs <= 0:
+            raise HTTPException(400, "Indica los montos recibidos en $ y/o Bs")
+        recibido = received_usd + received_bs / tasa
+        if recibido < monto - 0.005:
+            raise HTTPException(400, "Los montos recibidos no cubren el monto a cobrar")
+
+    grupo = uuid4().hex
+    restante = monto
+    aplicados: list[dict] = []
+    primero = True
+
+    for cuenta in cuentas:
+        if restante <= 0.005:
+            break
+        saldo = cuenta.saldo_usd
+        if saldo <= 0.005:
+            continue
+        aplicado = round(min(restante, saldo), 2)
+        if aplicado <= 0:
+            continue
+
+        db.add(PagoCredito(
+            cuenta_id=cuenta.id,
+            monto_usd=aplicado,
+            monto_bs=round(aplicado * tasa, 2),
+            rate_usd=tasa,
+            payment_method=metodo,
+            reference=referencia,
+            # El monto entregado corresponde a la cobranza completa: se guarda
+            # una sola vez para no duplicarlo al sumar por cuenta.
+            received_bs=(received_bs if primero else None) or None,
+            received_usd=(received_usd if primero else None) or None,
+            grupo_pago=grupo,
+            registrado_por=getattr(user, "username", None),
+        ))
+
+        restante -= aplicado
+        primero = False
+        aplicados.append({"cuenta_id": cuenta.id, "sale_id": cuenta.sale_id, "monto_usd": aplicado})
+
+        cuenta.payment_method = metodo
+        cuenta.reference = referencia
+        if round(saldo - aplicado, 2) <= 0.005:
+            cuenta.status = "pagado"
+            cuenta.paid_at = _utcnow()
+
+    db.commit()
+
+    return {
+        "ok": True,
+        "grupo_pago": grupo,
+        "cliente_id": cliente_id,
+        "cliente_name": cliente.name,
+        "monto_usd": round(monto, 2),
+        "monto_bs": round(monto * tasa, 2),
+        "saldo_restante_usd": round(max(saldo_total - monto, 0), 2),
+        "aplicado": aplicados,
+    }
+
+
 @router.post("/marcar-notificadas")
 def marcar_notificadas(
     cuenta_ids: list[int],
@@ -240,13 +366,23 @@ def actualizar_cuenta(
     if not cuenta:
         raise HTTPException(404, "Cuenta por cobrar no encontrada")
 
-    if data.client_name is not None:
+    if data.cliente_id is not None:
+        cliente = db.query(Cliente).filter(Cliente.id == data.cliente_id).first()
+        if not cliente:
+            raise HTTPException(400, "Cliente del directorio no encontrado")
+        cuenta.cliente_id = cliente.id
+        cuenta.client_name = cliente.name
+        if cuenta.sale:
+            cuenta.sale.client_name = cliente.name
+    elif data.client_name is not None:
         nombre = data.client_name.strip()
         if not nombre:
             raise HTTPException(400, "El nombre del cliente no puede quedar vacío")
         cuenta.client_name = nombre
         if cuenta.sale:
             cuenta.sale.client_name = nombre
+        cliente = get_or_create_cliente(db, nombre)
+        cuenta.cliente_id = cliente.id if cliente else None
 
     if data.days_term is not None and data.days_term != cuenta.days_term:
         # Recalcula el vencimiento conservando el ancla actual. El ancla va en

@@ -2,6 +2,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from datetime import datetime
 
 from paths import DATABASE_PATH
 
@@ -26,10 +27,14 @@ def habilitar_columnas(db):
     table_columns = {
         "products": {
             "sale_unit": "VARCHAR DEFAULT 'unidad'",
+            "category_type": "VARCHAR DEFAULT 'normal'",
             "activo": "BOOLEAN DEFAULT 1",
         },
         "users": {
             "role": "VARCHAR DEFAULT 'vendedor'",
+        },
+        "categories": {
+            "category_type": "VARCHAR DEFAULT 'normal'",
         },
         "purchase_details": {
             "boxes": "INTEGER",
@@ -64,6 +69,10 @@ def habilitar_columnas(db):
             "notified": "BOOLEAN DEFAULT 0",
             "payment_method": "VARCHAR",
             "reference": "VARCHAR",
+            "cliente_id": "INTEGER",
+        },
+        "pagos_credito": {
+            "grupo_pago": "VARCHAR",
         },
     }
     for tabla, columnas in table_columns.items():
@@ -86,6 +95,52 @@ def habilitar_columnas(db):
         # Las deudas a crédito quedan denominadas en dólares: el método de pago
         # y la conversión a Bs se definen al cobrar (tasa del día del pago).
         db.execute(text("UPDATE cuentas_credito SET currency='USD' WHERE currency IS NULL OR currency<>'USD'"))
+    except OperationalError:
+        pass
+
+    # Backfill: heredar category_type de categoría a productos
+    try:
+        db.execute(text(
+            "UPDATE products SET category_type = (SELECT c.category_type FROM categories c WHERE c.id = products.category_id) "
+            "WHERE products.category_id IS NOT NULL AND (products.category_type IS NULL OR products.category_type = '')"
+        ))
+        db.execute(text("UPDATE products SET category_type = 'normal' WHERE (products.category_type IS NULL OR products.category_type = '')"))
+    except OperationalError:
+        pass
+
+    # Backfill del directorio de clientes: crea un cliente por cada nombre
+    # distinto usado en créditos y enlaza las cuentas existentes (idempotente).
+    try:
+        from textutils import normalize_name_key
+        filas = db.execute(text(
+            "SELECT id, client_name FROM cuentas_credito "
+            "WHERE cliente_id IS NULL AND client_name IS NOT NULL "
+            "AND TRIM(client_name) <> ''"
+        )).fetchall()
+        for cuenta_id, nombre in filas:
+            clave = normalize_name_key(nombre)
+            if not clave:
+                continue
+            fila = db.execute(
+                text("SELECT id FROM clientes WHERE name_key = :k"), {"k": clave}
+            ).fetchone()
+            if fila:
+                cliente_id = fila[0]
+            else:
+                db.execute(
+                    text(
+                        "INSERT INTO clientes (name, name_key, phone, notes, activo, created_at) "
+                        "VALUES (:n, :k, NULL, NULL, 1, :t)"
+                    ),
+                    {"n": nombre.strip(), "k": clave, "t": datetime.utcnow()},
+                )
+                cliente_id = db.execute(
+                    text("SELECT id FROM clientes WHERE name_key = :k"), {"k": clave}
+                ).fetchone()[0]
+            db.execute(
+                text("UPDATE cuentas_credito SET cliente_id = :cid WHERE id = :id"),
+                {"cid": cliente_id, "id": cuenta_id},
+            )
     except OperationalError:
         pass
 

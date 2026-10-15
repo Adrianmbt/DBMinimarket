@@ -28,7 +28,7 @@ const menuItems = [
   { text: 'Inventario', icon: <InventoryIcon />, path: '/productos' },
   { text: 'Ventas', icon: <PointOfSaleIcon />, path: '/ventas' },
   { text: 'Compras', icon: <ShoppingCartIcon />, path: '/compras' },
-  { text: 'Créditos', icon: <AccountBalanceWalletIcon />, path: '/creditos', adminOnly: true },
+  { text: 'Cr\u00e9ditos', icon: <AccountBalanceWalletIcon />, path: '/creditos', adminOnly: true },
   { text: 'Usuarios', icon: <GroupIcon />, path: '/usuarios', adminOnly: true },
 ]
 

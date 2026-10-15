@@ -7,7 +7,7 @@ from services.bcv import fetch_and_update_bcv_rate, refresh_bcv_in_background, s
 from models import ExchangeRate, User
 from security import hash_password
 from schemas import ExchangeRateResponse
-from routers import productos, ventas, compras, usuarios, dashboard, categorias, mantenimiento, creditos
+from routers import productos, ventas, compras, usuarios, dashboard, categorias, mantenimiento, creditos, clientes
 from config import CORS_ORIGINS
 from frontend_static import montar_frontend
 
@@ -131,6 +131,7 @@ app.include_router(usuarios.router)
 app.include_router(dashboard.router)
 app.include_router(mantenimiento.router)
 app.include_router(creditos.router)
+app.include_router(clientes.router)
 
 # Servir la interfaz compilada (frontend/dist) cuando exista. Si está en modo
 # solo API (sin build), esto no hace nada.

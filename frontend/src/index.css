@@ -58,6 +58,19 @@ body {
   100% { background-position: 200% 0; }
 }
 
+/* Fila recién agregada al carrito: entra desde arriba (el resaltado de color
+   se controla desde el componente para poder mantenerlo ~1.5s). */
+@keyframes row-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @keyframes pulse-subtle {
   0%, 100% { transform: scale(1); }
   50% { transform: scale(1.02); }

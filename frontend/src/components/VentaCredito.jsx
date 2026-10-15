@@ -4,6 +4,7 @@ import {
   Paper, Button, Dialog, DialogTitle, DialogContent, DialogActions,
   TextField, Typography, IconButton, Alert, Snackbar, Box, Chip,
   Avatar, Divider, Slide, MenuItem, Select, FormControl, InputLabel,
+  useMediaQuery,
 } from '@mui/material'
 import {
   CreditCard, Search, Close, AddCircle, RemoveCircle, Delete,
@@ -12,6 +13,7 @@ import {
 import { getProductos } from '../api/productos'
 import { getTasa } from '../api/tasa'
 import { createVenta } from '../api/ventas'
+import { mensajeError } from '../utils/error'
 
 export const formatNumber = (n, digits = 2) => {
   if (n === undefined || n === null || Number.isNaN(n)) return '—'
@@ -40,9 +42,12 @@ export default function VentaCredito({ open, onClose, onVentaCreada }) {
   const [submitting, setSubmitting] = useState(false)
   const [tasa, setTasa] = useState(null)
   const [snack, setSnack] = useState({ open: false, msg: '', severity: 'success' })
+  const [highlightId, setHighlightId] = useState(null)
 
   const searchRef = useRef(null)
   const resultsRef = useRef(null)
+  const highlightTimer = useRef(null)
+  const isWide = useMediaQuery('(min-width: 1000px)')
 
   useEffect(() => {
     if (open) {
@@ -56,6 +61,10 @@ export default function VentaCredito({ open, onClose, onVentaCreada }) {
       setTimeout(() => searchRef.current?.focus(), 200)
     }
   }, [open])
+
+  useEffect(() => () => {
+    if (highlightTimer.current) clearTimeout(highlightTimer.current)
+  }, [])
 
   const cargarDatos = async () => {
     try {
@@ -101,6 +110,9 @@ export default function VentaCredito({ open, onClose, onVentaCreada }) {
         max_stock: producto.stock,
       }]
     })
+    setHighlightId(producto.id)
+    if (highlightTimer.current) clearTimeout(highlightTimer.current)
+    highlightTimer.current = setTimeout(() => setHighlightId(null), 1600)
     setSearch('')
     setShowResults(false)
     setTimeout(() => searchRef.current?.focus(), 50)
@@ -255,31 +267,52 @@ export default function VentaCredito({ open, onClose, onVentaCreada }) {
         onClose={onClose}
         maxWidth="md"
         fullWidth
+        fullScreen={!isWide}
         slots={{ transition: Slide }}
-        slotProps={{ paper: { sx: { borderRadius: 3, overflow: 'hidden', minHeight: 500 } }, transition: { direction: 'up' } }}
+        slotProps={{ paper: { sx: { borderRadius: isWide ? 3 : 0, overflow: 'hidden', height: isWide ? 'min(92dvh, 900px)' : '100%', display: 'flex', flexDirection: 'column' } }, transition: { direction: 'up' } }}
       >
         <DialogTitle sx={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          bgcolor: '#2D5A1E', color: '#FFF8F0', py: 2, px: 3,
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1.5,
+          bgcolor: '#2D5A1E', color: '#FFF8F0', py: 1.2, px: 2.5, flexShrink: 0,
         }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 0 }}>
             <CreditCard sx={{ fontSize: 22 }} />
-            <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 600, fontSize: '1.15rem' }}>
+            <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 600, fontSize: '1.15rem', whiteSpace: 'nowrap' }}>
               Nueva Venta a Crédito
             </Typography>
           </Box>
-          <IconButton
-            onClick={onClose}
-            size="small"
-            sx={{ color: 'rgba(255, 248, 240, 0.6)', '&:hover': { color: '#FFF8F0', bgcolor: 'rgba(255,248,240,0.1)' } }}
-          >
-            <Close fontSize="small" />
-          </IconButton>
+
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, ml: 'auto' }}>
+            <Box sx={{ textAlign: 'right', lineHeight: 1.05 }}>
+              <Typography sx={{ fontSize: '0.6rem', textTransform: 'uppercase', letterSpacing: '0.08em', color: 'rgba(255,248,240,0.75)' }}>
+                Total a cobrar
+              </Typography>
+              <Typography sx={{ fontFamily: '"Playfair Display", serif', fontWeight: 700, fontSize: '1.3rem', whiteSpace: 'nowrap' }}>
+                {money(totalCobrar, currency)}
+              </Typography>
+              {totalUSD > 0 && (
+                <Typography sx={{ fontSize: '0.62rem', color: 'rgba(255,248,240,0.8)', whiteSpace: 'nowrap' }}>
+                  {money(totalUSD, 'USD')}{tasaActual ? ` · Bs. ${formatNumber(tasaActual)}` : ''}
+                </Typography>
+              )}
+            </Box>
+            <IconButton
+              onClick={onClose}
+              size="small"
+              sx={{ color: 'rgba(255, 248, 240, 0.6)', '&:hover': { color: '#FFF8F0', bgcolor: 'rgba(255,248,240,0.1)' } }}
+            >
+              <Close fontSize="small" />
+            </IconButton>
+          </Box>
         </DialogTitle>
 
-        <DialogContent sx={{ p: 0, display: 'flex', flexDirection: 'column', height: '100%' }}>
+        <DialogContent sx={{ p: 0, display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          {/* Fila principal: carrito (izq) + panel (der) */}
+          <Box sx={{ display: 'flex', flexDirection: isWide ? 'row' : 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          {/* Columna izquierda: buscador + carrito */}
+          <Box sx={{ display: 'flex', flexDirection: 'column', flex: isWide ? '1.7 1 0' : '1 1 auto', minWidth: 0, minHeight: 0 }}>
           {/* Search Bar */}
-          <Box sx={{ position: 'relative', px: 3, pt: 3, pb: 0 }}>
+          <Box sx={{ position: 'relative', px: 2.5, pt: 2, pb: 0, flexShrink: 0 }}>
             <Box sx={{ position: 'relative' }}>
               <TextField
                 inputRef={searchRef}
@@ -319,7 +352,7 @@ export default function VentaCredito({ open, onClose, onVentaCreada }) {
               <Paper
                 ref={resultsRef}
                 sx={{
-                  position: 'absolute', top: '100%', left: 24, right: 24, zIndex: 10,
+                  position: 'absolute', top: '100%', left: 20, right: 20, zIndex: 10,
                   maxHeight: 220, overflow: 'auto', mt: 0.5, borderRadius: 2,
                   boxShadow: '0 8px 24px rgba(44, 24, 16, 0.12)',
                   border: '1px solid rgba(45, 90, 30, 0.1)',
@@ -365,7 +398,7 @@ export default function VentaCredito({ open, onClose, onVentaCreada }) {
             {showResults && search.trim() && filtered.length === 0 && (
               <Paper
                 sx={{
-                  position: 'absolute', top: '100%', left: 24, right: 24, zIndex: 10,
+                  position: 'absolute', top: '100%', left: 20, right: 20, zIndex: 10,
                   mt: 0.5, borderRadius: 2, p: 2, textAlign: 'center',
                   boxShadow: '0 8px 24px rgba(44, 24, 16, 0.12)',
                 }}
@@ -377,71 +410,8 @@ export default function VentaCredito({ open, onClose, onVentaCreada }) {
             )}
           </Box>
 
-          {/* Cliente, Plazo y Moneda */}
-          <Box sx={{ px: 3, pt: 2 }}>
-            <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-              <TextField
-                label="Nombre del cliente *"
-                value={clientName}
-                onChange={e => setClientName(e.target.value)}
-                size="small"
-                placeholder="Obligatorio para crédito"
-                required
-                sx={{
-                  flex: 1, minWidth: 180,
-                  '& .MuiOutlinedInput-root': {
-                    borderRadius: 2, bgcolor: '#F8F5F0',
-                    '& fieldset': { borderColor: 'rgba(45, 90, 30, 0.3)' },
-                    '&:hover fieldset': { borderColor: '#2D5A1E' },
-                    '&.Mui-focused fieldset': { borderColor: '#2D5A1E' },
-                  },
-                }}
-              />
-              <FormControl size="small" sx={{ minWidth: 130 }}>
-                <InputLabel sx={{ color: '#6B5344' }}>Plazo de pago</InputLabel>
-                <Select
-                  value={daysTerm}
-                  label="Plazo de pago"
-                  onChange={e => setDaysTerm(e.target.value)}
-                  sx={{
-                    borderRadius: 2, bgcolor: '#F8F5F0',
-                    '& fieldset': { borderColor: 'rgba(45, 90, 30, 0.3)' },
-                    '&:hover fieldset': { borderColor: '#2D5A1E' },
-                    '&.Mui-focused fieldset': { borderColor: '#2D5A1E' },
-                  }}
-                >
-                  {TERM_OPTIONS.map(opt => (
-                    <MenuItem key={opt.value} value={opt.value}>
-                      <CalendarMonth sx={{ fontSize: 18, mr: 1, color: '#2D5A1E' }} />
-                      {opt.label}
-                    </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-              <FormControl size="small" sx={{ minWidth: 120 }}>
-                <InputLabel sx={{ color: '#6B5344' }}>Moneda</InputLabel>
-                <Select
-                  value={currency}
-                  label="Moneda"
-                  onChange={e => setCurrency(e.target.value)}
-                  sx={{
-                    borderRadius: 2, bgcolor: '#F8F5F0',
-                    '& fieldset': { borderColor: 'rgba(45, 90, 30, 0.3)' },
-                    '&:hover fieldset': { borderColor: '#2D5A1E' },
-                    '&.Mui-focused fieldset': { borderColor: '#2D5A1E' },
-                  }}
-                >
-                  <MenuItem value="BS">Bolívares (Bs.)</MenuItem>
-                  <MenuItem value="USD">Dólares ($)</MenuItem>
-                </Select>
-              </FormControl>
-            </Box>
-          </Box>
-
-          <Divider sx={{ mx: 3, my: 2 }} />
-
           {/* Cart */}
-          <Box sx={{ flex: 1, px: 3, overflow: 'auto', minHeight: 180 }}>
+          <Box sx={{ flex: 1, minHeight: 0, px: 2.5, pb: 1, overflow: 'auto' }}>
             {cart.length === 0 ? (
               <Box sx={{ textAlign: 'center', py: 4 }}>
                 <ShoppingCart sx={{ fontSize: 48, color: '#A5C49B', mb: 1, opacity: 0.4 }} />
@@ -454,14 +424,17 @@ export default function VentaCredito({ open, onClose, onVentaCreada }) {
               </Box>
             ) : (
               <>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, position: 'sticky', top: 0, zIndex: 1, bgcolor: '#FFF8F0' }}>
                   <Receipt sx={{ fontSize: 18, color: '#6B5344', opacity: 0.5 }} />
                   <Typography sx={{ fontWeight: 600, color: '#2C1810', fontSize: '0.85rem' }}>
                     Carrito ({itemsCount} item{itemsCount !== 1 ? 's' : ''})
                   </Typography>
+                  <Typography sx={{ fontSize: '0.7rem', color: '#6B5344', opacity: 0.6, ml: 'auto' }}>
+                    Último agregado arriba
+                  </Typography>
                 </Box>
 
-                <Table size="small">
+                <Table size="small" sx={{ '& .MuiTableCell-root': { py: 0.5 } }}>
                   <TableHead>
                     <TableRow sx={{ bgcolor: '#F0F7EC' }}>
                       <TableCell sx={{ fontWeight: 600, color: '#6B5344', fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Producto</TableCell>
@@ -472,12 +445,15 @@ export default function VentaCredito({ open, onClose, onVentaCreada }) {
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {cart.map((c, i) => (
+                    {[...cart].reverse().map((c) => (
                       <TableRow
                         key={c.product_id}
                         sx={{
-                          animation: `fade-in-up 0.2s ease-out ${i * 0.03}s both`,
-                          '&:hover': { bgcolor: 'rgba(45, 90, 30, 0.03)' },
+                          animation: 'row-enter 0.28s ease-out both',
+                          bgcolor: c.product_id === highlightId ? 'rgba(45, 90, 30, 0.12)' : 'transparent',
+                          boxShadow: c.product_id === highlightId ? 'inset 3px 0 0 #2D5A1E' : 'none',
+                          transition: 'background-color 0.45s ease, box-shadow 0.45s ease',
+                          '&:hover': { bgcolor: 'rgba(45, 90, 30, 0.05)' },
                         }}
                       >
                         <TableCell>
@@ -577,40 +553,107 @@ export default function VentaCredito({ open, onClose, onVentaCreada }) {
               </>
             )}
           </Box>
+          </Box>
+          {/* fin columna izquierda */}
 
-          {/* Bottom: Info + Total + Actions */}
+          {/* Columna derecha: cliente, plazo, moneda y resumen */}
           <Box sx={{
-            borderTop: '1px solid rgba(45, 90, 30, 0.1)',
+            display: 'flex', flexDirection: 'column',
+            flex: isWide ? '1 1 0' : '0 0 auto',
+            minWidth: isWide ? 340 : 0, minHeight: 0,
+            borderLeft: isWide ? '1px solid rgba(45, 90, 30, 0.15)' : 'none',
+            borderTop: isWide ? 'none' : '1px solid rgba(45, 90, 30, 0.15)',
             bgcolor: '#F0F7EC',
-            px: 3, py: 2,
+            overflowY: 'auto',
+            maxHeight: isWide ? 'none' : '46vh',
           }}>
-            <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 2 }}>
-              <Box sx={{ flex: 1, minWidth: 200 }}>
-                <Alert severity="info" sx={{ borderRadius: 2, bgcolor: 'rgba(45, 90, 30, 0.06)', border: '1px solid rgba(45, 90, 30, 0.2)' }}>
-                  <Typography sx={{ fontWeight: 600, fontSize: '0.85rem', color: '#2D5A1E' }}>
-                    Venta a Crédito
-                  </Typography>
-                  <Typography variant="body2" sx={{ color: '#6B5344', mt: 0.5 }}>
-                    El cliente pagará después. La venta se reflejará en ventas diarias y en cuentas por cobrar.
-                  </Typography>
-                </Alert>
-                <Box sx={{ mt: 1.5, p: 1.5, borderRadius: 2, bgcolor: 'rgba(45, 90, 30, 0.04)', border: '1px dashed rgba(45, 90, 30, 0.2)' }}>
-                  <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}>
-                    <strong>Cliente:</strong> {clientName || '—'}
-                  </Typography>
-                  <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}>
-                    <strong>Moneda:</strong> {currency === 'BS' ? 'Bolívares' : 'Dólares'}
-                  </Typography>
-                  <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}>
-                    <strong>Plazo:</strong> {daysTerm} días (vence: {fechaVencimiento})
-                  </Typography>
-                  <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}>
-                    <strong>Saldo:</strong> {money(totalCobrar, currency)}
-                  </Typography>
-                </Box>
+            {/* Cliente, Plazo y Moneda */}
+            <Box sx={{ px: 2.5, pt: 2, pb: 0, flexShrink: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <TextField
+                label="Nombre del cliente *"
+                value={clientName}
+                onChange={e => setClientName(e.target.value)}
+                size="small"
+                placeholder="Obligatorio para crédito"
+                required
+                fullWidth
+                sx={{
+                  '& .MuiOutlinedInput-root': {
+                    borderRadius: 2, bgcolor: '#FFF8F0',
+                    '& fieldset': { borderColor: 'rgba(45, 90, 30, 0.3)' },
+                    '&:hover fieldset': { borderColor: '#2D5A1E' },
+                    '&.Mui-focused fieldset': { borderColor: '#2D5A1E' },
+                  },
+                }}
+              />
+              <Box sx={{ display: 'flex', gap: 2 }}>
+                <FormControl size="small" sx={{ flex: 1, minWidth: 120 }}>
+                  <InputLabel sx={{ color: '#6B5344' }}>Plazo de pago</InputLabel>
+                  <Select
+                    value={daysTerm}
+                    label="Plazo de pago"
+                    onChange={e => setDaysTerm(e.target.value)}
+                    sx={{
+                      borderRadius: 2, bgcolor: '#FFF8F0',
+                      '& fieldset': { borderColor: 'rgba(45, 90, 30, 0.3)' },
+                      '&:hover fieldset': { borderColor: '#2D5A1E' },
+                      '&.Mui-focused fieldset': { borderColor: '#2D5A1E' },
+                    }}
+                  >
+                    {TERM_OPTIONS.map(opt => (
+                      <MenuItem key={opt.value} value={opt.value}>
+                        <CalendarMonth sx={{ fontSize: 18, mr: 1, color: '#2D5A1E' }} />
+                        {opt.label}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <FormControl size="small" sx={{ flex: 1, minWidth: 110 }}>
+                  <InputLabel sx={{ color: '#6B5344' }}>Moneda</InputLabel>
+                  <Select
+                    value={currency}
+                    label="Moneda"
+                    onChange={e => setCurrency(e.target.value)}
+                    sx={{
+                      borderRadius: 2, bgcolor: '#FFF8F0',
+                      '& fieldset': { borderColor: 'rgba(45, 90, 30, 0.3)' },
+                      '&:hover fieldset': { borderColor: '#2D5A1E' },
+                      '&.Mui-focused fieldset': { borderColor: '#2D5A1E' },
+                    }}
+                  >
+                    <MenuItem value="BS">Bolívares (Bs.)</MenuItem>
+                    <MenuItem value="USD">Dólares ($)</MenuItem>
+                  </Select>
+                </FormControl>
               </Box>
+            </Box>
 
-              <Box sx={{ textAlign: 'right', minWidth: 160 }}>
+            <Divider sx={{ mx: 2.5, my: 1.5 }} />
+
+            {/* Resumen */}
+            <Box sx={{ px: 2.5, flexShrink: 0 }}>
+              <Typography sx={{ fontSize: '0.72rem', color: '#6B5344' }}>
+                El cliente pagará después · se refleja en ventas diarias y en cuentas por cobrar.
+              </Typography>
+              <Box sx={{ mt: 1, p: 1.25, borderRadius: 2, bgcolor: 'rgba(45, 90, 30, 0.04)', border: '1px dashed rgba(45, 90, 30, 0.2)', display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+                <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}>
+                  <strong>Cliente:</strong> {clientName || '—'}
+                </Typography>
+                <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}>
+                  <strong>Moneda:</strong> {currency === 'BS' ? 'Bolívares' : 'Dólares'}
+                </Typography>
+                <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}>
+                  <strong>Plazo:</strong> {daysTerm} días (vence: {fechaVencimiento})
+                </Typography>
+                <Typography sx={{ fontSize: '0.75rem', color: '#6B5344' }}>
+                  <strong>Saldo:</strong> {money(totalCobrar, currency)}
+                </Typography>
+              </Box>
+            </Box>
+
+            {/* Total */}
+            <Box sx={{ px: 2.5, pb: 2, pt: 1.5, mt: 'auto' }}>
+              <Box sx={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 2 }}>
                 <Typography variant="caption" sx={{ color: '#6B5344', textTransform: 'uppercase', letterSpacing: '0.08em', fontSize: '0.65rem' }}>
                   Total a cobrar
                 </Typography>
@@ -621,42 +664,41 @@ export default function VentaCredito({ open, onClose, onVentaCreada }) {
                 }}>
                   {money(totalCobrar, currency)}
                 </Typography>
-                <Typography sx={{ fontSize: '0.72rem', color: '#6B5344' }}>
-                  ({money(totalUSD, 'USD')} · tasa {tasaActual ? `Bs. ${tasaActual}` : 's/tasa'})
-                </Typography>
               </Box>
+              <Typography sx={{ fontSize: '0.72rem', color: '#6B5344', textAlign: 'right' }}>
+                ({money(totalUSD, 'USD')} · tasa {tasaActual ? `Bs. ${tasaActual}` : 's/tasa'})
+              </Typography>
             </Box>
+          </Box>
+          {/* fin columna derecha */}
+          </Box>
+          {/* fin fila principal */}
 
-            <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1.5, mt: 2 }}>
-              <Button
-                onClick={onClose}
-                sx={{ color: '#6B5344', fontWeight: 500, borderRadius: 2, px: 3, '&:hover': { bgcolor: 'rgba(107,83,68,0.08)' } }}
-              >
-                Cancelar
-              </Button>
-              <Button
-                variant="contained"
-                onClick={handleCreate}
-                disabled={cart.length === 0 || submitting || !tasaActual || !clientName.trim()}
-                sx={{
-                  background: 'linear-gradient(135deg, #2D5A1E 0%, #1E3D14 100%)',
-                  '&:hover': {
-                    background: 'linear-gradient(135deg, #3A7028 0%, #2D5A1E 100%)',
-                    transform: 'translateY(-1px)',
-                  },
-                  px: 4, py: 1.2, borderRadius: 2,
-                  fontWeight: 600, fontSize: '0.95rem',
-                  boxShadow: '0 4px 14px rgba(45, 90, 30, 0.3)',
-                  transition: 'all 0.2s ease',
-                  '&.Mui-disabled': {
-                    background: 'rgba(45, 90, 30, 0.3)',
-                    color: 'rgba(255, 248, 240, 0.5)',
-                  },
-                }}
-              >
-                {submitting ? 'Registrando...' : `Registrar Crédito ${money(totalCobrar, currency)}`}
-              </Button>
-            </Box>
+          {/* Footer: solo registrar */}
+          <Box sx={{ flexShrink: 0, px: 2.5, py: 1.2, borderTop: '1px solid rgba(45, 90, 30, 0.15)', bgcolor: '#F0F7EC', display: 'flex', justifyContent: 'flex-end' }}>
+            <Button
+              variant="contained"
+              onClick={handleCreate}
+              disabled={cart.length === 0 || submitting || !tasaActual || !clientName.trim()}
+              sx={{
+                background: 'linear-gradient(135deg, #2D5A1E 0%, #1E3D14 100%)',
+                '&:hover': {
+                  background: 'linear-gradient(135deg, #3A7028 0%, #2D5A1E 100%)',
+                  transform: 'translateY(-1px)',
+                },
+                width: { xs: '100%', md: 'auto' },
+                px: 4, py: 1.2, borderRadius: 2,
+                fontWeight: 600, fontSize: '0.95rem',
+                boxShadow: '0 4px 14px rgba(45, 90, 30, 0.3)',
+                transition: 'all 0.2s ease',
+                '&.Mui-disabled': {
+                  background: 'rgba(45, 90, 30, 0.3)',
+                  color: 'rgba(255, 248, 240, 0.5)',
+                },
+              }}
+            >
+              {submitting ? 'Registrando...' : `Registrar Crédito ${money(totalCobrar, currency)}`}
+            </Button>
           </Box>
         </DialogContent>
       </Dialog>

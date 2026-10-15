@@ -16,6 +16,7 @@ class Category(Base):
     name = Column(String, unique=True, index=True, nullable=False)
     description = Column(String, nullable=True)
     sale_unit = Column(String, default="unidad")  # unidad | peso
+    category_type = Column(String, default="normal")
     created_at = Column(DateTime, default=utcnow)
 
     products = relationship("Product", back_populates="category")
@@ -28,12 +29,13 @@ class Product(Base):
     barcode = Column(String, unique=True, index=True, nullable=True)  # Clave para el lector de barras
     name = Column(String, index=True, nullable=False)
     description = Column(String, nullable=True)
-    cost_price = Column(Float, nullable=False)  # Cuánto te costó a ti
-    sale_price = Column(Float, nullable=False)  # A cuánto lo vendes
+    cost_price = Column(Float, nullable=False)  # Cuanto te costó a ti
+    sale_price = Column(Float, nullable=False)  # A cuanto lo vendes
     stock = Column(Integer, default=0)
     min_stock = Column(Integer, default=5)  # Alerta de stock bajo
     category_id = Column(Integer, ForeignKey("categories.id"), nullable=True)
     sale_unit = Column(String, default="unidad")  # Copia denormalizada de la categoría (unidad/peso)
+    category_type = Column(String, default="normal")
     activo = Column(Boolean, default=True)       # Baja lógica: True (activo) / False (dado de baja)
 
     # Relaciones
@@ -170,6 +172,27 @@ class CierreDiario(Base):
     created_at = Column(DateTime, default=utcnow)
 
 
+class Cliente(Base):
+    """Cliente de confianza para ventas a crédito.
+
+    El directorio permite agrupar varias compras a crédito de una misma
+    persona y cobrarlas de forma consolidada. `name_key` es el nombre
+    normalizado (minúsculas, sin acentos ni espacios sobrantes) y único, para
+    evitar duplicados tipo "Juan"/"juan"/"JUAN".
+    """
+    __tablename__ = "clientes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    name_key = Column(String, unique=True, index=True, nullable=False)
+    phone = Column(String, nullable=True)
+    notes = Column(String, nullable=True)
+    activo = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    cuentas = relationship("CuentaCredito", back_populates="cliente")
+
+
 class CuentaCredito(Base):
     """Cuenta por cobrar: registra ventas a crédito pendientes de pago."""
     __tablename__ = "cuentas_credito"
@@ -177,6 +200,7 @@ class CuentaCredito(Base):
     id = Column(Integer, primary_key=True, index=True)
     sale_id = Column(Integer, ForeignKey("sales.id"), nullable=False, unique=True)
     client_name = Column(String, nullable=False)
+    cliente_id = Column(Integer, ForeignKey("clientes.id"), nullable=True, index=True)
     total_usd = Column(Float, nullable=False)          # Total en USD
     total_bs = Column(Float, nullable=False)           # Total en Bs (tasa del momento)
     currency = Column(String, default="BS")            # BS o USD — moneda en que se cobra
@@ -203,6 +227,7 @@ class CuentaCredito(Base):
     )
 
     sale = relationship("Sale", foreign_keys=[sale_id])
+    cliente = relationship("Cliente", back_populates="cuentas")
 
     @property
     def saldo_usd(self) -> float:
@@ -229,6 +254,7 @@ class PagoCredito(Base):
     received_bs = Column(Float, nullable=True)          # Mixto: Bs entregados
     received_usd = Column(Float, nullable=True)         # Mixto: $ entregados
     registrado_por = Column(String, nullable=True)      # Usuario que registró el cobro
+    grupo_pago = Column(String, nullable=True, index=True)  # Agrupa los pagos de un cobro consolidado
     created_at = Column(DateTime, default=utcnow, index=True)
 
     cuenta = relationship("CuentaCredito", back_populates="pagos")

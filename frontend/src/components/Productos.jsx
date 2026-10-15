@@ -17,7 +17,7 @@ import { mensajeError } from '../utils/error'
 
 const emptyProduct = {
   barcode: '', name: '', description: '', cost_price: 0, sale_price: 0,
-  stock: 0, min_stock: 5, category_id: null, sale_unit: 'unidad',
+  stock: 0, min_stock: 5, category_id: null, sale_unit: 'unidad', category_type: 'normal',
 }
 
 const formatFecha = (iso) => {
@@ -139,7 +139,7 @@ export default function Productos() {
 
   const handleEdit = (p) => {
     setEditId(p.id)
-    setForm({ ...emptyProduct, ...p, category_id: p.category_id || null, sale_unit: p.sale_unit || 'unidad' })
+    setForm({ ...emptyProduct, ...p, category_id: p.category_id || null, sale_unit: p.sale_unit || 'unidad', category_type: p.category_type || (p.category?.category_type) || 'normal' })
     setOpenEdit(true)
   }
 
@@ -202,6 +202,18 @@ export default function Productos() {
       const msg = mensajeError(err, 'Error al reactivar')
       setSnack({ open: true, msg, severity: 'error' })
     }
+  }
+
+  const getCatType = (c) => c?.category_type || c?.category?.category_type || 'normal'
+  const tipoLabel = (type) => {
+    if (type === 'fixed_bs') return 'Precio Fijo'
+    if (type === 'service') return 'Servicios'
+    return 'Normal'
+  }
+  const tipoColor = (type) => {
+    if (type === 'fixed_bs') return { bgcolor: 'rgba(232, 99, 12, 0.1)', color: '#E8630C' }
+    if (type === 'service') return { bgcolor: 'rgba(45, 90, 30, 0.1)', color: '#2D5A1E' }
+    return { bgcolor: 'rgba(201, 149, 42, 0.1)', color: '#6B5344' }
   }
 
   const unidadLabel = (v) => (v === 'peso' ? 'peso (kg)' : 'unidad')
@@ -358,9 +370,12 @@ export default function Productos() {
                     </Box>
                   </TableCell>
                   <TableCell>
-                    {p.category_name ? (
-                      <Chip label={p.category_name} size="small" sx={{ bgcolor: 'rgba(201, 149, 42, 0.1)', color: '#6B5344', fontSize: '0.7rem', fontWeight: 500, opacity: p.activo ? 1 : 0.6 }} />
-                    ) : <Typography variant="caption" sx={{ color: '#6B5344', opacity: 0.4 }}>—</Typography>}
+                    <Box sx={{ display: 'flex', gap: 0.5, alignItems: 'center', flexWrap: 'wrap' }}>
+                      {p.category_name && (
+                        <Chip label={p.category_name} size="small" sx={{ bgcolor: 'rgba(201, 149, 42, 0.1)', color: '#6B5344', fontSize: '0.7rem', fontWeight: 500, opacity: p.activo ? 1 : 0.6 }} />
+                      )}
+                      <Chip label={tipoLabel(getCatType(p))} size="small" sx={{ ...tipoColor(getCatType(p)), fontSize: '0.65rem', fontWeight: 600, opacity: p.activo ? 1 : 0.6 }} />
+                    </Box>
                   </TableCell>
                   <TableCell>
                     <Chip
@@ -556,18 +571,23 @@ export default function Productos() {
                 onChange={e => {
                   const catId = e.target.value
                   const cat = categorias.find(c => c.id === catId)
-                  setForm({ ...form, category_id: catId, sale_unit: cat?.sale_unit || 'unidad' })
+                  setForm({ ...form, category_id: catId, sale_unit: cat?.sale_unit || 'unidad', category_type: cat?.category_type || 'normal' })
                 }}
               >
                 <MenuItem value=""><em>Sin categoría</em></MenuItem>
-                {categorias.map(c => (
-                  <MenuItem key={c.id} value={c.id}>{c.name}</MenuItem>
-                ))}
+                {categorias.map(c => <MenuItem key={c.id} value={c.id}>{c.name} ({c.sale_unit}) - {tipoLabel(c.category_type)}</MenuItem>)}
               </Select>
             </FormControl>
+            {form.category_id && (
+              <Typography variant="caption" color="text.secondary">
+                Tipo derivado de categoría: {tipoLabel(getCatType({ category_type: form.category_type }))}
+              </Typography>
+            )}
             {editId ? (
               <Typography variant="caption" sx={{ color: '#6B5344', bgcolor: 'rgba(45, 90, 30, 0.06)', px: 1.5, py: 0.8, borderRadius: 1, fontWeight: 500 }}>
-                El stock no se edita aquí: entra por las compras y sale por las ventas o las bajas de stock.
+                {isAdmin
+                  ? 'El stock se edita aquí. Las compras, ventas y bajas de stock también lo mueven.'
+                  : 'Solo el administrador puede editar el stock.'}
               </Typography>
             ) : (
               <Typography variant="caption" sx={{ color: '#6B5344', bgcolor: 'rgba(45, 90, 30, 0.06)', px: 1.5, py: 0.8, borderRadius: 1, fontWeight: 500 }}>
@@ -579,9 +599,9 @@ export default function Productos() {
                 label="Stock"
                 type="number"
                 value={form.stock}
-                onChange={e => setForm({ ...form, stock: parseInt(limpiarNumero(e.target.value), 10) || 0 })}
+                onChange={e => setForm({ ...form, stock: Math.max(0, parseInt(limpiarNumero(e.target.value), 10) || 0) })}
                 size="small"
-                disabled={!!editId}
+                disabled={!isAdmin}
                 sx={{ flex: 1 }}
                 helperText={unidadLabel(form.sale_unit)}
               />

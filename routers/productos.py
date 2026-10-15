@@ -8,14 +8,16 @@ from security import get_current_user, requiere_admin
 router = APIRouter(prefix="/api/productos", tags=["Productos"])
 
 
-def _sync_sale_unit(producto: Product, db: Session):
-    """El sale_unit lo define la categoría (unidad/peso)."""
+def _sync_from_category(producto: Product, db: Session):
+    """El sale_unit y category_type se heredan de la categoría."""
     if producto.category_id:
         categoria = db.get(Category, producto.category_id)
         if categoria:
             producto.sale_unit = categoria.sale_unit
+            producto.category_type = categoria.category_type or "normal"
     else:
         producto.sale_unit = "unidad"
+        producto.category_type = producto.category_type or "normal"
 
 
 def _validar_barcode_unico(barcode, db: Session, excluir_id: int | None = None):
@@ -27,6 +29,17 @@ def _validar_barcode_unico(barcode, db: Session, excluir_id: int | None = None):
         q = q.filter(Product.id != excluir_id)
     if q.first():
         raise HTTPException(400, "Ya existe un producto con ese código de barras")
+
+
+def _normalizar_barcode(barcode):
+    """Sin código (vacío o en blanco) -> NULL.
+
+    products.barcode tiene índice ÚNICO: dos productos con '' violan la
+    restricción y la API respondería 500 en lugar de un error controlado.
+    SQLite permite varios NULL, así que "sin código" se representa así.
+    """
+    limpio = (barcode or "").strip()
+    return limpio or None
 
 
 @router.get("", response_model=list[ProductResponse])
@@ -73,11 +86,13 @@ def crear_producto(
     usuario: User = Depends(get_current_user),
 ):
     requiere_admin(usuario)
-    _validar_barcode_unico(producto.barcode, db)
+    payload = producto.model_dump()
+    payload["barcode"] = _normalizar_barcode(payload["barcode"])
+    _validar_barcode_unico(payload["barcode"], db)
     if producto.category_id and not db.get(Category, producto.category_id):
         raise HTTPException(400, "La categoría indicada no existe")
-    db_producto = Product(**producto.model_dump())
-    _sync_sale_unit(db_producto, db)
+    db_producto = Product(**payload)
+    _sync_from_category(db_producto, db)
     db.add(db_producto)
     db.commit()
     db.refresh(db_producto)
@@ -95,12 +110,14 @@ def actualizar_producto(
     db_producto = db.get(Product, id)
     if not db_producto:
         raise HTTPException(404, "Producto no encontrado")
-    _validar_barcode_unico(producto.barcode, db, excluir_id=id)
+    payload = producto.model_dump()
+    payload["barcode"] = _normalizar_barcode(payload["barcode"])
+    _validar_barcode_unico(payload["barcode"], db, excluir_id=id)
     if producto.category_id and not db.get(Category, producto.category_id):
         raise HTTPException(400, "La categoría indicada no existe")
-    for key, value in producto.model_dump().items():
+    for key, value in payload.items():
         setattr(db_producto, key, value)
-    _sync_sale_unit(db_producto, db)
+    _sync_from_category(db_producto, db)
     db.commit()
     db.refresh(db_producto)
     return db_producto

@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session, selectinload
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from database import get_db
-from models import Product, Sale, SaleDetail, ExchangeRate, CierreDiario, CuentaCredito
+from models import Product, Sale, SaleDetail, ExchangeRate, CierreDiario, CuentaCredito, Cliente
 from services.bcv import DEFAULT_RATE
 from services.pdf import generar_pdf_cierre, generar_pdf_factura, patas_pago
 from schemas import (
@@ -12,6 +12,7 @@ from schemas import (
 )
 from security import get_current_user, requiere_admin
 from time_ve import hoy_ve, rango_dia_ve, dia_de_utc_naive
+from routers.clientes import get_or_create_cliente
 
 router = APIRouter(prefix="/api/ventas", tags=["Ventas"])
 
@@ -328,29 +329,58 @@ def crear_venta(
     detalles = []
     total = 0.0
 
+    rate = _default_rate(db)
+
     for item in venta_data.items:
         producto = db.get(Product, item.product_id)
         if not producto:
             raise HTTPException(404, f"Producto {item.product_id} no encontrado")
-        if producto.stock is None or producto.stock < item.quantity:
-            raise HTTPException(400, f"Stock insuficiente para {producto.name}")
 
-        if producto.sale_unit == "peso":
-            # quantity viene en gramos y sale_price es por kilogramo
-            subtotal = producto.sale_price * (item.quantity / 1000.0)
-        else:
-            subtotal = producto.sale_price * item.quantity
+        tipo = getattr(producto, 'category_type', 'normal') or 'normal'
+
+        if tipo == 'service':
+            if item.price_bs is None or item.price_bs <= 0:
+                raise HTTPException(400, f"Se requiere price_bs válido para el servicio {producto.name}")
+            price_usd_item = item.price_bs / rate if rate else 0.0
+            subtotal = price_usd_item
+            detalles.append(SaleDetail(
+                product_id=item.product_id,
+                quantity=1,
+                price_at_sale=price_usd_item,
+                cost_price=producto.cost_price,
+            ))
+            # NO descuenta stock
+        elif tipo == 'fixed_bs':
+            if producto.stock is None or producto.stock < item.quantity:
+                raise HTTPException(400, f"Stock insuficiente para {producto.name}")
+            price_usd_item = producto.sale_price / rate if rate else 0.0
+            if producto.sale_unit == "peso":
+                subtotal = price_usd_item * (item.quantity / 1000.0)
+            else:
+                subtotal = price_usd_item * item.quantity
+            detalles.append(SaleDetail(
+                product_id=item.product_id,
+                quantity=item.quantity,
+                price_at_sale=price_usd_item,
+                cost_price=producto.cost_price,
+            ))
+            producto.stock -= item.quantity
+        else:  # normal
+            if producto.stock is None or producto.stock < item.quantity:
+                raise HTTPException(400, f"Stock insuficiente para {producto.name}")
+            if producto.sale_unit == "peso":
+                subtotal = producto.sale_price * (item.quantity / 1000.0)
+            else:
+                subtotal = producto.sale_price * item.quantity
+            detalles.append(SaleDetail(
+                product_id=item.product_id,
+                quantity=item.quantity,
+                price_at_sale=producto.sale_price,
+                cost_price=producto.cost_price,
+            ))
+            producto.stock -= item.quantity
 
         total += subtotal
-
-        detalles.append(SaleDetail(
-            product_id=item.product_id,
-            quantity=item.quantity,
-            price_at_sale=producto.sale_price,
-            cost_price=producto.cost_price,
-        ))
-
-        producto.stock -= item.quantity
 
     # Tasa BCV vigente para convertir a bolívares y registrar el cobro.
     db_rate = db.query(ExchangeRate).filter(ExchangeRate.currency == "USD").first()
@@ -359,10 +389,23 @@ def crear_venta(
 
     is_credit = venta_data.is_credit
 
+    # Cliente del directorio: si la venta a crédito trae cliente_id se usa ese
+    # cliente; si no, se resuelve por nombre (creándolo si hace falta).
+    cliente = None
+    client_name_final = venta_data.client_name
+
     # Venta a crédito: solo admin puede crear. No se valida cobro.
     if is_credit:
-        if not venta_data.client_name or not venta_data.client_name.strip():
-            raise HTTPException(400, "El nombre del cliente es obligatorio para ventas a crédito")
+        if venta_data.cliente_id:
+            cliente = db.get(Cliente, venta_data.cliente_id)
+            if not cliente:
+                raise HTTPException(400, "Cliente del directorio no encontrado")
+            client_name_final = cliente.name
+        else:
+            if not venta_data.client_name or not venta_data.client_name.strip():
+                raise HTTPException(400, "El nombre del cliente es obligatorio para ventas a crédito")
+            cliente = get_or_create_cliente(db, venta_data.client_name)
+            client_name_final = cliente.name if cliente else venta_data.client_name.strip()
         received_bs = 0.0
         received_usd = 0.0
         change_bs = None
@@ -400,7 +443,7 @@ def crear_venta(
         iva_amount=iva_v,
         igtf_amount=igtf_v,
         payment_method=venta_data.payment_method,
-        client_name=venta_data.client_name,
+        client_name=client_name_final,
         reference=venta_data.reference,
         rate_usd=rate,
         received_bs=received_bs if received_bs else None,
@@ -423,7 +466,8 @@ def crear_venta(
         due = hoy_ve() + timedelta(days=days)
         cuenta = CuentaCredito(
             sale_id=venta.id,
-            client_name=venta_data.client_name.strip(),
+            client_name=(client_name_final or "").strip(),
+            cliente_id=cliente.id if cliente else None,
             total_usd=round(total, 2),
             total_bs=round(total_bs_calc, 2),
             # La deuda queda denominada en dólares: el método de pago se
@@ -481,45 +525,63 @@ def actualizar_venta(
 
     # ── Items: reemplazo del detalle (devuelve stock y vuelve a descontar) ──
     if venta_data.items is not None:
+        rate = venta.rate_usd or _default_rate(db) or 1.0
         for d in list(venta.details):
             prod = db.get(Product, d.product_id)
             if prod:
-                prod.stock = (prod.stock or 0) + d.quantity
+                tipo_p = getattr(prod, 'category_type', 'normal') or 'normal'
+                if tipo_p != 'service':
+                    prod.stock = (prod.stock or 0) + d.quantity
         db.flush()
 
-        # Agregar cantidades por producto (un mismo producto no puede venir dos veces)
-        cantidades: dict[int, int] = {}
-        for item in venta_data.items:
-            cantidades[item.product_id] = cantidades.get(item.product_id, 0) + item.quantity
-
-        productos_nuevos: dict[int, Product] = {}
-        for pid, qty in cantidades.items():
-            prod = db.get(Product, pid)
-            if not prod:
-                raise HTTPException(404, f"Producto {pid} no encontrado")
-            if prod.stock is None or prod.stock < qty:
-                raise HTTPException(400, f"Stock insuficiente para {prod.name}")
-            productos_nuevos[pid] = prod
-
-        # Conservar el precio congelado de la venta original cuando el producto ya estaba
-        precios_previos = {d.product_id: (d.price_at_sale, d.cost_price) for d in venta.details}
         nuevos_detalles = []
         total = 0.0
-        for pid, qty in cantidades.items():
-            prod = productos_nuevos[pid]
-            precio, costo = precios_previos.get(pid, (prod.sale_price, prod.cost_price))
-            if prod.sale_unit == "peso":
-                subtotal = precio * (qty / 1000.0)
+        for item in venta_data.items:
+            prod = db.get(Product, item.product_id)
+            if not prod:
+                raise HTTPException(404, f"Producto {item.product_id} no encontrado")
+            tipo_p = getattr(prod, 'category_type', 'normal') or 'normal'
+            if tipo_p == 'service':
+                if item.price_bs is None or item.price_bs <= 0:
+                    raise HTTPException(400, f"Se requiere price_bs válido para el servicio {prod.name}")
+                price_usd_item = item.price_bs / rate if rate else 0.0
+                subtotal = price_usd_item
+                nuevos_detalles.append(SaleDetail(
+                    product_id=item.product_id,
+                    quantity=1,
+                    price_at_sale=price_usd_item,
+                    cost_price=prod.cost_price,
+                ))
+            elif tipo_p == 'fixed_bs':
+                if prod.stock is None or prod.stock < item.quantity:
+                    raise HTTPException(400, f"Stock insuficiente para {prod.name}")
+                price_usd_item = prod.sale_price / rate if rate else 0.0
+                if prod.sale_unit == "peso":
+                    subtotal = price_usd_item * (item.quantity / 1000.0)
+                else:
+                    subtotal = price_usd_item * item.quantity
+                nuevos_detalles.append(SaleDetail(
+                    product_id=item.product_id,
+                    quantity=item.quantity,
+                    price_at_sale=price_usd_item,
+                    cost_price=prod.cost_price,
+                ))
+                prod.stock -= item.quantity
             else:
-                subtotal = precio * qty
+                if prod.stock is None or prod.stock < item.quantity:
+                    raise HTTPException(400, f"Stock insuficiente para {prod.name}")
+                if prod.sale_unit == "peso":
+                    subtotal = prod.sale_price * (item.quantity / 1000.0)
+                else:
+                    subtotal = prod.sale_price * item.quantity
+                nuevos_detalles.append(SaleDetail(
+                    product_id=item.product_id,
+                    quantity=item.quantity,
+                    price_at_sale=prod.sale_price,
+                    cost_price=prod.cost_price,
+                ))
+                prod.stock -= item.quantity
             total += subtotal
-            nuevos_detalles.append(SaleDetail(
-                product_id=pid,
-                quantity=qty,
-                price_at_sale=precio,
-                cost_price=costo,
-            ))
-            prod.stock -= qty
 
         venta.details = nuevos_detalles
         venta.total = round(total, 2)
@@ -544,7 +606,16 @@ def actualizar_venta(
         venta.payment_method = metodo
 
     # ── Cliente ──
-    if venta_data.client_name is not None:
+    if venta.is_credit and venta_data.cliente_id is not None:
+        cliente = db.get(Cliente, venta_data.cliente_id)
+        if not cliente:
+            raise HTTPException(400, "Cliente del directorio no encontrado")
+        venta.client_name = cliente.name
+        cuenta = _cuenta_de(db, venta)
+        if cuenta:
+            cuenta.client_name = cliente.name
+            cuenta.cliente_id = cliente.id
+    elif venta_data.client_name is not None:
         nombre = venta_data.client_name.strip() or None
         if venta.is_credit and not nombre:
             raise HTTPException(400, "El cliente es obligatorio en ventas a crédito")
@@ -553,6 +624,8 @@ def actualizar_venta(
             cuenta = _cuenta_de(db, venta)
             if cuenta:
                 cuenta.client_name = nombre or ""
+                cliente = get_or_create_cliente(db, nombre) if nombre else None
+                cuenta.cliente_id = cliente.id if cliente else None
 
     # ── Referencia / nota ──
     if venta_data.reference is not None:

@@ -9,6 +9,7 @@ class CategoryBase(BaseModel):
     name: str = Field(..., min_length=1)
     description: Optional[str] = None
     sale_unit: str = "unidad"  # unidad | peso
+    category_type: str = Field("normal", pattern="^(normal|fixed_bs|service)$")
 
 
 class CategoryCreate(CategoryBase):
@@ -35,6 +36,7 @@ class ProductBase(BaseModel):
     min_stock: int = Field(5, ge=0)
     category_id: Optional[int] = Field(None, gt=0)
     sale_unit: str = Field("unidad", pattern="^(unidad|peso)$")
+    category_type: str = Field("normal", pattern="^(normal|fixed_bs|service)$")
 
 
 class ProductCreate(ProductBase):
@@ -78,7 +80,7 @@ class SaleDetailBase(BaseModel):
     quantity: int = Field(..., gt=0)
 
 class SaleDetailCreate(SaleDetailBase):
-    pass
+    price_bs: Optional[float] = Field(None, ge=0)
 
 class SaleDetailResponse(SaleDetailBase):
     id: int
@@ -117,6 +119,8 @@ class SaleCreate(BaseModel):
     reference_2: Optional[str] = None
     # Venta a crédito (solo admin)
     is_credit: bool = False
+    # Cliente del directorio (opcional; si se omite se usa client_name)
+    cliente_id: Optional[int] = None
     # Plazo de crédito en días (7, 10 o 15)
     days_term: int = Field(15, ge=7, le=15)
     items: List[SaleDetailCreate] = Field(..., min_length=1)
@@ -132,6 +136,7 @@ class SaleUpdate(BaseModel):
     """
     payment_method: Optional[str] = None
     client_name: Optional[str] = None
+    cliente_id: Optional[int] = None
     reference: Optional[str] = None
     received_bs: Optional[float] = Field(None, ge=0)
     received_usd: Optional[float] = Field(None, ge=0)
@@ -164,12 +169,41 @@ class SaleResponse(SaleBase):
 
 
 # ==========================================
+# ESQUEMAS DE CLIENTES (DIRECTORIO DE CRÉDITO)
+# ==========================================
+class ClienteCreate(BaseModel):
+    name: str = Field(..., min_length=1)
+    phone: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ClienteUpdate(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    notes: Optional[str] = None
+    activo: Optional[bool] = None
+
+
+class ClienteResponse(BaseModel):
+    id: int
+    name: str
+    phone: Optional[str] = None
+    notes: Optional[str] = None
+    activo: bool = True
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ==========================================
 # ESQUEMAS DE CUENTAS POR COBRAR (CRÉDITO)
 # ==========================================
 class CuentaCreditoResponse(BaseModel):
     id: int
     sale_id: int
     client_name: str
+    cliente_id: Optional[int] = None
+    cliente: Optional[ClienteResponse] = None
     total_usd: float
     total_bs: float
     currency: str
@@ -202,6 +236,7 @@ class PagoCreditoResponse(BaseModel):
     received_bs: Optional[float] = None
     received_usd: Optional[float] = None
     registrado_por: Optional[str] = None
+    grupo_pago: Optional[str] = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -229,6 +264,7 @@ class CuentaCreditoUpdate(BaseModel):
     el ancla actual (due_date o fecha de creación).
     """
     client_name: Optional[str] = None
+    cliente_id: Optional[int] = None
     days_term: Optional[int] = Field(None, ge=7, le=15)
     notes: Optional[str] = None
 
